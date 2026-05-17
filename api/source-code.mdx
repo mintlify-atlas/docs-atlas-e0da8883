@@ -1,0 +1,375 @@
+---
+title: "SourceCode module API reference"
+description: "Effectful wrappers over oxlint's SourceCode object — tokens, comments, location, scope, and text queries that return Effect<T, never, RuleContext>."
+---
+
+The `SourceCode` module provides effectful wrappers around every method on oxlint's `SourceCode` object. Instead of accessing `ctx.sourceCode` directly and handling `null` returns, each function reads from the `RuleContext` service and returns an `Effect<T, never, RuleContext>` that you can `yield*` inside a visitor handler. Nullable results are lifted to `Option` — empty arrays stay as empty arrays.
+
+## `withSourceCode` pattern
+
+Internally every function in this module uses the same `withSourceCode` helper:
+
+```typescript
+const withSourceCode = <A>(
+  fn: (sc: OxlintSourceCode) => A
+): Effect.Effect<A, never, RuleContext> =>
+  Effect.service(RuleContext).pipe(Effect.map((ctx) => fn(ctx.sourceCode)));
+```
+
+You can use the same pattern to compose multiple queries without repeating the context lookup:
+
+```typescript
+import { RuleContext } from 'effect-oxlint';
+import * as Effect from 'effect/Effect';
+
+const myQuery = Effect.service(RuleContext).pipe(
+  Effect.map((ctx) => {
+    const text = ctx.sourceCode.getText(node);
+    const tokens = ctx.sourceCode.getTokens(node);
+    return { text, tokens };
+  })
+);
+```
+
+## Source text
+
+### `getText`
+
+```typescript
+export const getText = (): Effect.Effect<string, never, RuleContext>
+```
+
+Returns the full source text of the file being linted.
+
+```typescript
+const text = yield* SourceCode.getText();
+```
+
+### `getNodeText`
+
+```typescript
+export const getNodeText = (
+  node: ESTree.Node,
+  beforeCount?: number,
+  afterCount?: number
+): Effect.Effect<string, never, RuleContext>
+```
+
+Returns the source text that spans the given node. Pass `beforeCount` and `afterCount` to include additional characters before and after the node's range.
+
+<ParamField path="node" type="ESTree.Node" required>
+  The AST node whose source text you want.
+</ParamField>
+
+<ParamField path="beforeCount" type="number">
+  Number of characters to include before the node's start offset.
+</ParamField>
+
+<ParamField path="afterCount" type="number">
+  Number of characters to include after the node's end offset.
+</ParamField>
+
+```typescript
+const text = yield* SourceCode.getNodeText(node);
+const withContext = yield* SourceCode.getNodeText(node, 10, 10);
+```
+
+### `getLines`
+
+```typescript
+export const getLines = (): Effect.Effect<ReadonlyArray<string>, never, RuleContext>
+```
+
+Returns all source lines as a `ReadonlyArray<string>`.
+
+## Ancestry
+
+### `getAncestors`
+
+```typescript
+export const getAncestors = (
+  node: ESTree.Node
+): Effect.Effect<ReadonlyArray<ESTree.Node>, never, RuleContext>
+```
+
+Returns the ancestor nodes of `node` ordered from innermost to outermost. The result array does not include the node itself.
+
+<Note>
+  oxlint's upstream `getAncestors` types the return as `Node[]` where `Node` is the base `Span` interface. The wrapper casts to `ReadonlyArray<ESTree.Node>` at the FFI boundary — the runtime values are always full ESTree nodes.
+</Note>
+
+## Location and range
+
+### `getLocFromIndex`
+
+```typescript
+export const getLocFromIndex = (
+  offset: number
+): Effect.Effect<LineColumn, never, RuleContext>
+```
+
+Converts a 0-based source offset to a `{ line, column }` location.
+
+### `getIndexFromLoc`
+
+```typescript
+export const getIndexFromLoc = (
+  loc: LineColumn
+): Effect.Effect<number, never, RuleContext>
+```
+
+Converts a `{ line, column }` location to a 0-based source offset.
+
+### `getRange`
+
+```typescript
+export const getRange = (
+  nodeOrToken: ESTree.Node | Token | Comment
+): Effect.Effect<Range, never, RuleContext>
+```
+
+Returns the `[start, end]` range tuple for a node, token, or comment.
+
+### `getNodeByRangeIndex`
+
+```typescript
+export const getNodeByRangeIndex = (
+  offset: number
+): Effect.Effect<Option.Option<ESTree.Node>, never, RuleContext>
+```
+
+Finds the smallest AST node that spans the given 0-based source offset. Returns `Option.none()` when no node covers that position.
+
+## Token queries
+
+### `getFirstToken`
+
+```typescript
+export const getFirstToken = (
+  node: ESTree.Node
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Returns the first token of a node, or `Option.none()` if the node has no tokens.
+
+### `getLastToken`
+
+```typescript
+export const getLastToken = (
+  node: ESTree.Node
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Returns the last token of a node, or `Option.none()` if the node has no tokens.
+
+### `getTokens`
+
+```typescript
+export const getTokens = (
+  node: ESTree.Node
+): Effect.Effect<ReadonlyArray<Token>, never, RuleContext>
+```
+
+Returns all tokens belonging to a node.
+
+### `getTokenBefore`
+
+```typescript
+export const getTokenBefore = (
+  nodeOrToken: ESTree.Node | Token | Comment
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Returns the token immediately before the given node, token, or comment, or `Option.none()` if there is none.
+
+### `getTokenAfter`
+
+```typescript
+export const getTokenAfter = (
+  nodeOrToken: ESTree.Node | Token | Comment
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Returns the token immediately after the given node, token, or comment, or `Option.none()` if there is none.
+
+### `getTokensBetween`
+
+```typescript
+export const getTokensBetween = (
+  left: ESTree.Node | Token | Comment,
+  right: ESTree.Node | Token | Comment
+): Effect.Effect<ReadonlyArray<Token>, never, RuleContext>
+```
+
+Returns all tokens found between `left` and `right`.
+
+### `getFirstTokenBetween`
+
+```typescript
+export const getFirstTokenBetween = (
+  left: ESTree.Node | Token | Comment,
+  right: ESTree.Node | Token | Comment
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Returns the first token between `left` and `right`, or `Option.none()` if there are none.
+
+### `getTokenByRangeStart`
+
+```typescript
+export const getTokenByRangeStart = (
+  offset: number
+): Effect.Effect<Option.Option<Token>, never, RuleContext>
+```
+
+Looks up the token whose range start equals the given 0-based offset. Returns `Option.none()` when no token starts at that position.
+
+## Comment queries
+
+### `getAllComments`
+
+```typescript
+export const getAllComments = (): Effect.Effect<ReadonlyArray<Comment>, never, RuleContext>
+```
+
+Returns every comment node in the file.
+
+### `getCommentsBefore`
+
+```typescript
+export const getCommentsBefore = (
+  nodeOrToken: ESTree.Node | Token | Comment
+): Effect.Effect<ReadonlyArray<Comment>, never, RuleContext>
+```
+
+Returns all comments that appear immediately before `nodeOrToken`.
+
+### `getCommentsAfter`
+
+```typescript
+export const getCommentsAfter = (
+  nodeOrToken: ESTree.Node | Token | Comment
+): Effect.Effect<ReadonlyArray<Comment>, never, RuleContext>
+```
+
+Returns all comments that appear immediately after `nodeOrToken`.
+
+### `getCommentsInside`
+
+```typescript
+export const getCommentsInside = (
+  node: ESTree.Node
+): Effect.Effect<ReadonlyArray<Comment>, never, RuleContext>
+```
+
+Returns all comments that appear inside `node`.
+
+### `getJSDocComment`
+
+```typescript
+export const getJSDocComment = (
+  node: ESTree.Node
+): Effect.Effect<Option.Option<Comment>, never, RuleContext>
+```
+
+Returns the JSDoc comment for a node if one exists, otherwise `Option.none()`.
+
+<Warning>
+  `getJSDocComment` is deprecated upstream. Prefer `getCommentsBefore` and filter for block comments starting with `/**` instead.
+</Warning>
+
+### `commentsExistBetween`
+
+```typescript
+export const commentsExistBetween = (
+  left: ESTree.Node | Token | Comment,
+  right: ESTree.Node | Token | Comment
+): Effect.Effect<boolean, never, RuleContext>
+```
+
+Returns `true` if at least one comment exists between `left` and `right`.
+
+## Scope queries
+
+### `getScope`
+
+```typescript
+export const getScope = (
+  node: ESTree.Node
+): Effect.Effect<Scope, never, RuleContext>
+```
+
+Returns the lexical `Scope` for a node. Combine with the `Scope` module to walk up the scope chain or look up variables.
+
+### `getDeclaredVariables`
+
+```typescript
+export const getDeclaredVariables = (
+  node: ESTree.Node
+): Effect.Effect<ReadonlyArray<Variable>, never, RuleContext>
+```
+
+Returns the variables declared by a node (e.g. the bindings introduced by a `VariableDeclaration`).
+
+### `isGlobalReference`
+
+```typescript
+export const isGlobalReference = (
+  node: ESTree.Node
+): Effect.Effect<boolean, never, RuleContext>
+```
+
+Returns `true` when `node` is a reference to a global variable.
+
+### `markVariableAsUsed`
+
+```typescript
+export const markVariableAsUsed = (
+  name: string,
+  refNode?: ESTree.Node
+): Effect.Effect<boolean, never, RuleContext>
+```
+
+Marks the named variable as used in the scope of `refNode` (or the current scope when omitted). Returns `true` on success. This is typically used to suppress `no-unused-vars` false positives.
+
+## Spacing
+
+### `isSpaceBetween`
+
+```typescript
+export const isSpaceBetween = (
+  first: ESTree.Node | Token | Comment,
+  second: ESTree.Node | Token | Comment
+): Effect.Effect<boolean, never, RuleContext>
+```
+
+Returns `true` when there is at least one whitespace character between `first` and `second`.
+
+## Usage example
+
+The following visitor handler combines several queries to inspect the text and tokens of a detected node:
+
+```typescript
+import { Diagnostic, Rule, SourceCode } from 'effect-oxlint';
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+
+const noSemiRule = Rule.define({
+  name: 'check-semicolon',
+  meta: Rule.meta({ type: 'layout', description: 'Enforce semicolons' }),
+  create: function* () {
+    return {
+      ExpressionStatement: (node) =>
+        Effect.gen(function* () {
+          const lastToken = yield* SourceCode.getLastToken(node);
+
+          if (Option.isNone(lastToken)) return;
+          if (lastToken.value.value !== ';') {
+            const before = yield* SourceCode.getTokenBefore(lastToken.value);
+            yield* Effect.log(`Missing semicolon after token: ${Option.getOrElse(before, () => ({ value: '?' })).value}`);
+          }
+        })
+    };
+  }
+});
+```

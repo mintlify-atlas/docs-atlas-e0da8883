@@ -1,0 +1,223 @@
+---
+title: "Scope module API reference"
+description: "API reference for the Scope module: Option-safe variable lookup, reference filtering, scope navigation, and boolean predicates for Effect-first lint rules."
+---
+
+The `Scope` module provides pure helper functions for analysing lexical scopes, variables, and references inside lint rules. Unlike the `SourceCode` module, these functions are not effectful — they operate directly on `Scope`, `Variable`, and `Reference` values you already hold. Functions that may return nothing use `Option` rather than `null`. Combine them with `SourceCode.getScope` to walk the scope tree inside any visitor handler.
+
+## Variable lookup
+
+### `findVariable`
+
+```typescript
+export const findVariable: {
+  (name: string): (scope: OxlintScope) => Option.Option<Variable>;
+  (scope: OxlintScope, name: string): Option.Option<Variable>;
+}
+```
+
+Searches the scope's `set` map for a variable with the given `name`. Returns `Option.some(variable)` when found, `Option.none()` otherwise. Supports both data-first and data-last (pipeable) calling styles.
+
+<ParamField path="scope" type="Scope" required>
+  The lexical scope to search within.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  The variable name to look up.
+</ParamField>
+
+<CodeGroup>
+
+```typescript Data-first
+import { Scope } from 'effect-oxlint';
+import * as Option from 'effect/Option';
+
+const variable = Scope.findVariable(scope, 'myVar');
+```
+
+```typescript Data-last (pipeable)
+import { Scope } from 'effect-oxlint';
+import { pipe } from 'effect/Function';
+
+const variable = pipe(scope, Scope.findVariable('myVar'));
+```
+
+</CodeGroup>
+
+### `findVariableUp`
+
+```typescript
+export const findVariableUp: {
+  (name: string): (scope: OxlintScope) => Option.Option<Variable>;
+  (scope: OxlintScope, name: string): Option.Option<Variable>;
+}
+```
+
+Like `findVariable`, but walks up the scope chain through each `upper` scope until the variable is found or the global scope is exhausted. Returns `Option.none()` when no scope in the chain declares the variable.
+
+<ParamField path="scope" type="Scope" required>
+  The starting scope. The search proceeds from here toward the global scope.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  The variable name to look up.
+</ParamField>
+
+```typescript
+import { Scope } from 'effect-oxlint';
+import * as Option from 'effect/Option';
+
+const result = Scope.findVariableUp(innerScope, 'useEffect');
+
+Option.match(result, {
+  onNone: () => console.log('not found in any scope'),
+  onSome: (v) => console.log('found:', v.name)
+});
+```
+
+## Variable predicates
+
+### `isUsed`
+
+```typescript
+export const isUsed = (variable: Variable): boolean
+```
+
+Returns `true` when the variable has at least one read reference. A variable with only write references is not considered "used".
+
+### `isWritten`
+
+```typescript
+export const isWritten = (variable: Variable): boolean
+```
+
+Returns `true` when the variable has at least one write reference.
+
+### `isReadOnly`
+
+```typescript
+export const isReadOnly = (variable: Variable): boolean
+```
+
+Returns `true` when every reference to the variable is read-only (i.e. `ref.isReadOnly()` is true for all references).
+
+## Reference helpers
+
+### `getReferences`
+
+```typescript
+export const getReferences = (variable: Variable): ReadonlyArray<Reference>
+```
+
+Returns all references for a variable — both reads and writes.
+
+### `getReadReferences`
+
+```typescript
+export const getReadReferences = (variable: Variable): ReadonlyArray<Reference>
+```
+
+Returns only the references where `ref.isRead()` is true.
+
+### `getWriteReferences`
+
+```typescript
+export const getWriteReferences = (variable: Variable): ReadonlyArray<Reference>
+```
+
+Returns only the references where `ref.isWrite()` is true.
+
+## Scope navigation
+
+### `upper`
+
+```typescript
+export const upper = (scope: OxlintScope): Option.Option<OxlintScope>
+```
+
+Returns the parent scope, or `Option.none()` when `scope` is the global scope and has no parent.
+
+### `childScopes`
+
+```typescript
+export const childScopes = (scope: OxlintScope): ReadonlyArray<OxlintScope>
+```
+
+Returns the direct child scopes of `scope`.
+
+### `variables`
+
+```typescript
+export const variables = (scope: OxlintScope): ReadonlyArray<Variable>
+```
+
+Returns all variables declared directly in `scope`.
+
+### `throughReferences`
+
+```typescript
+export const throughReferences = (scope: OxlintScope): ReadonlyArray<Reference>
+```
+
+Returns the "through" references — identifiers that are referenced inside `scope` but not resolved there (i.e. they reference bindings in an outer scope or globals).
+
+### `isStrict`
+
+```typescript
+export const isStrict = (scope: OxlintScope): boolean
+```
+
+Returns `true` when the scope is in strict mode (e.g. an ES module, a function with `'use strict'`, or a class body).
+
+## Combining with `SourceCode.getScope`
+
+The `Scope` functions operate on plain scope objects, so you first obtain the scope via `SourceCode.getScope` inside a visitor handler, then pass it to the pure Scope helpers:
+
+```typescript
+import { Diagnostic, Rule, Scope, SourceCode } from 'effect-oxlint';
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+
+const noUnusedImports = Rule.define({
+  name: 'no-unused-imports',
+  meta: Rule.meta({ type: 'suggestion', description: 'Flag unused import bindings' }),
+  create: function* () {
+    return {
+      ImportDeclaration: (node) =>
+        Effect.gen(function* () {
+          const scope = yield* SourceCode.getScope(node);
+          const declared = yield* SourceCode.getDeclaredVariables(node);
+
+          for (const variable of declared) {
+            if (!Scope.isUsed(variable)) {
+              yield* Effect.log(`Unused import: ${variable.name}`);
+            }
+          }
+        })
+    };
+  }
+});
+```
+
+<Tip>
+  Use `findVariableUp` when a visitor handler encounters a reference node and you need to resolve the binding from any enclosing scope. Use `findVariable` when you already have the exact scope that should declare the name.
+</Tip>
+
+## Scope chain traversal example
+
+Walk up the scope chain to check whether a node is inside a strict-mode context:
+
+```typescript
+import { Scope } from 'effect-oxlint';
+import * as Option from 'effect/Option';
+import { pipe } from 'effect/Function';
+
+const isInStrictScope = (scope: OxlintScope): boolean => {
+  if (Scope.isStrict(scope)) return true;
+  return pipe(
+    Scope.upper(scope),
+    Option.map(isInStrictScope),
+    Option.getOrElse(() => false)
+  );
+};
+```

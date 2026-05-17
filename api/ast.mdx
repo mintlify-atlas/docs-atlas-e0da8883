@@ -1,0 +1,492 @@
+---
+title: "AST module API reference"
+description: "API reference for the AST module: Option-returning matchers with dual API for member expressions, calls, imports, node narrowing, and ancestor traversal."
+---
+
+The `AST` module provides safe, composable pattern matching helpers for ESTree nodes. Every matcher returns an `Option` value, making it natural to chain with `Option.map`, `Option.flatMap`, and `pipe`. All public combinators support a **dual API**: call them data-first (pass the node as the first argument) or data-last (pass only the config and receive a curried function for use in `pipe`).
+
+## matchMember
+
+Matches a `MemberExpression` of the form `obj.prop` where `obj` is an identifier with the given name and `prop` matches one of the given property names. Returns `Option<ESTree.StaticMemberExpression>`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const matchMember: {
+  (
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): (
+    node: ESTree.MemberExpression
+  ) => Option.Option<ESTree.StaticMemberExpression>
+}
+```
+
+```typescript Data-first
+export const matchMember: {
+  (
+    node: ESTree.MemberExpression,
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): Option.Option<ESTree.StaticMemberExpression>
+}
+```
+
+</CodeGroup>
+
+```typescript
+// Data-first
+AST.matchMember(node, 'JSON', ['parse', 'stringify'])
+
+// Data-last — pipe-friendly
+pipe(node, AST.matchMember('JSON', ['parse', 'stringify']))
+
+// Chain after narrowing from ESTree.Node
+pipe(
+  AST.narrow(node, 'MemberExpression'),
+  Option.flatMap(AST.matchMember('Effect', 'gen'))
+)
+```
+
+---
+
+## isMember
+
+Boolean predicate form of `matchMember`. Returns `true` when the `MemberExpression` is `obj.prop`. Use `matchMember` when you need the narrowed node.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const isMember: {
+  (
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): (node: ESTree.MemberExpression) => boolean
+}
+```
+
+```typescript Data-first
+export const isMember: {
+  (
+    node: ESTree.MemberExpression,
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): boolean
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.isMember(node, 'Math', 'random')           // data-first
+pipe(node, AST.isMember('Math', 'random'))     // data-last
+```
+
+---
+
+## matchCallOf
+
+Matches a `CallExpression` whose callee is `obj.prop(...)`. Returns the call expression narrowed to confirm its callee is a static member expression: `Option<ESTree.CallExpression>`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const matchCallOf: {
+  (
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): (node: ESTree.CallExpression) => Option.Option<ESTree.CallExpression>
+}
+```
+
+```typescript Data-first
+export const matchCallOf: {
+  (
+    node: ESTree.CallExpression,
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): Option.Option<ESTree.CallExpression>
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.matchCallOf(node, 'Effect', 'gen')
+AST.matchCallOf(node, 'Effect', ['fn', 'fnUntraced'])
+
+// Pipe-friendly after narrowing
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+)
+```
+
+---
+
+## isCallOf
+
+Boolean predicate form of `matchCallOf`. Returns `true` when the `CallExpression` is a call of `obj.prop(...)`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const isCallOf: {
+  (
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): (node: ESTree.CallExpression) => boolean
+}
+```
+
+```typescript Data-first
+export const isCallOf: {
+  (
+    node: ESTree.CallExpression,
+    obj: string,
+    prop: string | ReadonlyArray<string>
+  ): boolean
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.isCallOf(node, 'Effect', 'gen')           // data-first
+pipe(node, AST.isCallOf('Effect', 'gen'))     // data-last
+```
+
+---
+
+## matchImport
+
+Matches an `ImportDeclaration` whose source matches a string or predicate. Returns `Option<ESTree.ImportDeclaration>`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const matchImport: {
+  (
+    source: string | ((source: string) => boolean)
+  ): (
+    node: ESTree.ImportDeclaration
+  ) => Option.Option<ESTree.ImportDeclaration>
+}
+```
+
+```typescript Data-first
+export const matchImport: {
+  (
+    node: ESTree.ImportDeclaration,
+    source: string | ((source: string) => boolean)
+  ): Option.Option<ESTree.ImportDeclaration>
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.matchImport(node, 'node:fs')
+AST.matchImport(node, (src) => src.startsWith('node:'))
+
+// Pipe-friendly
+pipe(node, AST.matchImport('node:fs'))
+```
+
+---
+
+## isImport
+
+Boolean predicate form of `matchImport`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const isImport: {
+  (
+    source: string | ((source: string) => boolean)
+  ): (node: ESTree.ImportDeclaration) => boolean
+}
+```
+
+```typescript Data-first
+export const isImport: {
+  (
+    node: ESTree.ImportDeclaration,
+    source: string | ((source: string) => boolean)
+  ): boolean
+}
+```
+
+</CodeGroup>
+
+---
+
+## calleeName
+
+Extracts the callee name from a `CallExpression` when the callee is a bare identifier (e.g. `fetch(...)`). Returns `Option<string>`.
+
+```typescript
+export const calleeName = (
+  node: ESTree.CallExpression
+): Option.Option<string>
+```
+
+```typescript
+// fetch(...) → Some('fetch')
+// obj.method() → None (callee is a MemberExpression, not an identifier)
+AST.calleeName(callNode)
+```
+
+---
+
+## calleeIdentifier
+
+Extracts the callee identifier name from a `CallExpression` or `NewExpression` when the callee is a bare identifier. Unifies callee-name extraction across both node shapes.
+
+```typescript
+export const calleeIdentifier = (
+  node: ESTree.CallExpression | ESTree.NewExpression
+): Option.Option<string>
+```
+
+```typescript
+// CallExpression: fetch(...) → Some('fetch')
+AST.calleeIdentifier(callNode)
+
+// NewExpression: new Date() → Some('Date')
+AST.calleeIdentifier(newNode)
+```
+
+---
+
+## memberNames
+
+Extracts the object and property names from a static `MemberExpression`. Returns `Option<readonly [obj: string, prop: string]>`.
+
+```typescript
+export const memberNames = (
+  node: ESTree.MemberExpression
+): Option.Option<readonly [obj: string, prop: string]>
+```
+
+```typescript
+// Effect.gen → Some(['Effect', 'gen'])
+// obj[computed] → None (computed member)
+AST.memberNames(node)
+```
+
+---
+
+## importSource
+
+Extracts the import source string from an `ImportDeclaration`.
+
+```typescript
+export const importSource = (node: ESTree.ImportDeclaration): string
+```
+
+```typescript
+// import x from 'effect' → 'effect'
+AST.importSource(importNode)
+```
+
+---
+
+## objectKeys
+
+Collects the statically-known key names from an `ObjectExpression`. Spread elements and computed properties are ignored.
+
+```typescript
+export const objectKeys = (
+  node: ESTree.ObjectExpression
+): ReadonlyArray<string>
+```
+
+```typescript
+// { foo: 1, bar: 2 } → ['foo', 'bar']
+AST.objectKeys(objectNode)
+```
+
+---
+
+## objectHasKey
+
+Checks whether an `ObjectExpression` has a property with the given key.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const objectHasKey: {
+  (key: string): (node: ESTree.ObjectExpression) => boolean
+}
+```
+
+```typescript Data-first
+export const objectHasKey: {
+  (node: ESTree.ObjectExpression, key: string): boolean
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.objectHasKey(node, 'type')            // data-first
+pipe(node, AST.objectHasKey('type'))      // data-last
+```
+
+---
+
+## objectGetValue
+
+Gets the value expression for a given key in an `ObjectExpression`. Returns `Option<ESTree.Expression>`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const objectGetValue: {
+  (
+    key: string
+  ): (node: ESTree.ObjectExpression) => Option.Option<ESTree.Expression>
+}
+```
+
+```typescript Data-first
+export const objectGetValue: {
+  (
+    node: ESTree.ObjectExpression,
+    key: string
+  ): Option.Option<ESTree.Expression>
+}
+```
+
+</CodeGroup>
+
+```typescript
+// { type: 'problem' } with key 'type' → Some(Literal 'problem')
+AST.objectGetValue(node, 'type')
+pipe(node, AST.objectGetValue('type'))
+```
+
+---
+
+## narrow
+
+Narrows an `ESTree.Node` to a specific `type` string. Returns `Option<ESTree.Node & { readonly type: T }>`. A safe alternative to casting — returns `Option.none()` if the node's `type` doesn't match.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const narrow: {
+  <T extends string>(
+    type: T
+  ): (node: ESTree.Node) => Option.Option<ESTree.Node & { readonly type: T }>
+}
+```
+
+```typescript Data-first
+export const narrow: {
+  <T extends string>(
+    node: ESTree.Node,
+    type: T
+  ): Option.Option<ESTree.Node & { readonly type: T }>
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.narrow(node, 'CallExpression')                  // data-first
+pipe(node, AST.narrow('CallExpression'))            // data-last
+
+// Chain to get a fully typed node
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+)
+```
+
+---
+
+## memberPath
+
+Extracts the full member path from a (possibly chained) `MemberExpression`. Walks `a.b.c` to `['a', 'b', 'c']`. Returns `Option.none()` if any segment is computed or non-identifier.
+
+```typescript
+export const memberPath = (
+  node: ESTree.MemberExpression
+): Option.Option<Arr.NonEmptyReadonlyArray<string>>
+```
+
+```typescript
+// Effect.gen → Some(['Effect', 'gen'])
+// a.b.c.d   → Some(['a', 'b', 'c', 'd'])
+// a[b].c    → None (computed segment)
+AST.memberPath(node)
+```
+
+---
+
+## findAncestor
+
+Walks the `.parent` chain and returns the first ancestor whose `type` matches the given string literal. Returns `Option<{ readonly type: T; readonly parent?: unknown }>`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const findAncestor: {
+  <T extends string>(
+    type: T
+  ): (node: {
+    readonly parent?: unknown
+  }) => Option.Option<{ readonly type: T; readonly parent?: unknown }>
+}
+```
+
+```typescript Data-first
+export const findAncestor: {
+  <T extends string>(
+    node: { readonly parent?: unknown },
+    type: T
+  ): Option.Option<{ readonly type: T; readonly parent?: unknown }>
+}
+```
+
+</CodeGroup>
+
+```typescript
+// Find the enclosing function declaration (if any)
+const fn = AST.findAncestor(node, 'FunctionDeclaration')
+// Option<{ readonly type: 'FunctionDeclaration'; readonly parent?: unknown }>
+
+pipe(node, AST.findAncestor('FunctionDeclaration'))
+```
+
+---
+
+## hasAncestor
+
+Checks whether any ancestor of the node has the given `type`. Boolean form of `findAncestor`.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const hasAncestor: {
+  <T extends string>(
+    type: T
+  ): (node: { readonly parent?: unknown }) => boolean
+}
+```
+
+```typescript Data-first
+export const hasAncestor: {
+  <T extends string>(node: { readonly parent?: unknown }, type: T): boolean
+}
+```
+
+</CodeGroup>
+
+```typescript
+AST.hasAncestor(node, 'TryStatement')           // data-first
+pipe(node, AST.hasAncestor('TryStatement'))     // data-last
+```

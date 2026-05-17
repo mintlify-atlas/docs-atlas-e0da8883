@@ -1,0 +1,180 @@
+---
+title: "Assembling rules into an oxlint plugin"
+description: "How to use Plugin.define and Plugin.merge to collect effect-oxlint rules into an oxlint-compatible plugin that can be loaded from a config file."
+---
+
+An oxlint plugin is a plain object with a `meta.name` string and a `rules` record mapping rule names to `CreateRule` instances. `effect-oxlint` exports a `Plugin` module with two functions — `Plugin.define` and `Plugin.merge` — that make it straightforward to assemble rules into a plugin and export it from a module that oxlint can load.
+
+## What an oxlint plugin is
+
+At runtime, oxlint expects a plugin to match the `OxlintPlugin` shape:
+
+```ts
+type OxlintPlugin = {
+  meta: { name: string };
+  rules: Record<string, CreateRule>;
+};
+```
+
+`Plugin.define` constructs this object from a name and a map of rule names to `CreateRule` values. Because `Rule.define` (and all the convenience factories like `Rule.banMember`) return `CreateRule`, you can pass them directly without any additional wrapping.
+
+## Plugin.define
+
+Pass a `name` and a `rules` record to `Plugin.define`. Rule names should use kebab-case — oxlint references them as `plugin-name/rule-name` in diagnostics and configuration.
+
+```ts
+import { Plugin, Rule } from 'effect-oxlint';
+
+const noJsonParse = Rule.banMember('JSON', ['parse', 'stringify'], {
+  message: 'Use Schema for JSON decoding instead of JSON.parse'
+});
+
+const noMathRandom = Rule.banMember('Math', 'random', {
+  message: 'Use the Effect Random service instead'
+});
+
+const noNodeFs = Rule.banImport('node:fs', {
+  message: 'Use the Effect FileSystem service instead'
+});
+
+const noThrow = Rule.banStatement('ThrowStatement', {
+  message: 'Use Effect.fail instead of throw'
+});
+
+export default Plugin.define({
+  name: 'my-effect-rules',
+  rules: {
+    'no-json-parse': noJsonParse,
+    'no-math-random': noMathRandom,
+    'no-node-fs': noNodeFs,
+    'no-throw': noThrow
+  }
+});
+```
+
+The exported `default` is the value oxlint reads when it loads the plugin module.
+
+## Naming conventions
+
+<Steps>
+  <Step title="Plugin name">
+    Use kebab-case for the plugin name (e.g. `my-effect-rules`). oxlint prefixes every rule with this name in diagnostics: `my-effect-rules/no-json-parse`.
+  </Step>
+  <Step title="Rule keys in the rules record">
+    Use kebab-case for rule keys (e.g. `no-json-parse`). The key you choose here is what users write in their oxlint configuration, not the `name` field on the `RuleConfig` passed to `Rule.define`.
+  </Step>
+  <Step title="Auto-generated names from convenience factories">
+    Convenience factories (`Rule.banMember`, `Rule.banCallOf`, etc.) auto-generate an internal rule name from their arguments. For example, `Rule.banMember('JSON', ['parse', 'stringify'], ...)` generates the internal name `ban-json-parse-stringify`. This name appears in tracing spans but is not the name exposed to oxlint — that comes from the key you assign in the `rules` record.
+  </Step>
+</Steps>
+
+## Plugin.merge
+
+`Plugin.merge` combines multiple `OxlintPlugin` objects into one. This is useful for splitting a large rule set across several files and joining them at the export boundary, or for re-exporting third-party plugins alongside your own.
+
+```ts
+import { Plugin } from 'effect-oxlint';
+import { corePlugin } from './plugins/core.ts';
+import { asyncPlugin } from './plugins/async.ts';
+
+export default Plugin.merge(corePlugin, asyncPlugin);
+```
+
+<Note>
+If two plugins define a rule with the same name, the later plugin's definition wins. The merged plugin's `meta.name` is the joined names of all input plugins separated by `+`.
+</Note>
+
+## Recommended module structure
+
+For projects with more than a handful of rules, split the rule definitions and plugin assembly across separate files:
+
+<CodeGroup>
+
+```ts rules/no-json-parse.ts
+import { Rule } from 'effect-oxlint';
+
+export const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Use Schema for JSON decoding instead of JSON.parse'
+  }),
+  create: function* () {
+    // ...
+  }
+});
+```
+
+```ts rules/index.ts
+export { noJsonParse } from './no-json-parse.ts';
+export { noMathRandom } from './no-math-random.ts';
+```
+
+```ts plugin.ts
+import { Plugin } from 'effect-oxlint';
+import { noJsonParse, noMathRandom } from './rules/index.ts';
+
+export default Plugin.define({
+  name: 'my-effect-rules',
+  rules: {
+    'no-json-parse': noJsonParse,
+    'no-math-random': noMathRandom
+  }
+});
+```
+
+</CodeGroup>
+
+This structure keeps individual rule files focused on a single concern and makes the `plugin.ts` file a clear manifest of everything the plugin exposes.
+
+## How oxlint loads plugins
+
+oxlint resolves plugins through its configuration file. Reference the plugin's module path under the `plugins` key, then enable individual rules under `rules`:
+
+```json
+{
+  "plugins": ["./plugin.ts"],
+  "rules": {
+    "my-effect-rules/no-json-parse": "error",
+    "my-effect-rules/no-math-random": "warn"
+  }
+}
+```
+
+The default export of `plugin.ts` is the `OxlintPlugin` object produced by `Plugin.define`. oxlint reads `meta.name` from it to namespace the rules.
+
+<Tip>
+For Bun and Deno projects, oxlint can import TypeScript plugin files directly. For Node.js projects, ensure the plugin file is processed by a TypeScript-aware bundler or runner (such as `tsx`) before oxlint attempts to load it.
+</Tip>
+
+## Using Plugin.merge for large rule sets
+
+`Plugin.merge` is especially helpful when you want to organise rules into domain-specific sub-plugins and compose them at the top level:
+
+```ts
+import { Plugin } from 'effect-oxlint';
+import { noJsonParse, noMathRandom } from './rules/data.ts';
+import { noThrow, noRunSync } from './rules/effects.ts';
+
+const dataPlugin = Plugin.define({
+  name: 'my-effect-rules-data',
+  rules: { 'no-json-parse': noJsonParse, 'no-math-random': noMathRandom }
+});
+
+const effectsPlugin = Plugin.define({
+  name: 'my-effect-rules-effects',
+  rules: { 'no-throw': noThrow, 'no-run-sync': noRunSync }
+});
+
+// Export a single combined plugin
+export default Plugin.merge(dataPlugin, effectsPlugin);
+```
+
+<CardGroup cols={2}>
+  <Card title="Effect patterns" icon="code" href="/concepts/effect-patterns">
+    The full set of Effect idioms used in effect-oxlint rules.
+  </Card>
+  <Card title="Handler error channel" icon="triangle-exclamation" href="/concepts/error-channel">
+    Why handlers must have error channel `never` and how to handle fallible sub-effects.
+  </Card>
+</CardGroup>

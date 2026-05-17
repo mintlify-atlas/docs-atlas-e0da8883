@@ -1,0 +1,287 @@
+---
+title: "Visitor module API reference"
+description: "API reference for the Visitor module: on, onExit, merge, tracked, filter, and accumulate — combinators for composable Effect-returning AST visitors."
+---
+
+The `Visitor` module provides combinators for building and composing effectful AST visitors. A visitor is a map from AST node type names to `EffectHandler` functions that return `Effect<void, never, RuleContext>`. Combinators like `merge`, `tracked`, `filter`, and `accumulate` let you build complex traversal logic from small, focused pieces without mutable state.
+
+## Types
+
+### EffectHandler
+
+An effectful visitor handler. Receives an AST node and returns an `Effect<void>` that may read or write `Ref` state and report diagnostics via `RuleContext`.
+
+```typescript
+export type EffectHandler<N = ESTree.Node> = (
+  node: N
+) => Effect.Effect<void, never, RuleContext>
+```
+
+The error channel is **fixed to `never`**. Handlers cannot fail via `Effect.fail` because oxlint's plugin API is synchronous. If a handler calls a fallible effect, catch the error inside the handler and surface it as a diagnostic.
+
+### EffectVisitor
+
+A map from AST node type names (and `"NodeType:exit"` variants) to effectful handlers. This is the internal representation used by all combinators.
+
+```typescript
+export type EffectVisitor = {
+  readonly [key: string]: EffectHandler
+}
+```
+
+### TypedEffectVisitor
+
+A typed variant of `EffectVisitor` where known oxlint visitor keys provide a correctly narrowed node type to each handler. Return this from `Rule.define`'s `create` generator to get typed nodes without manual narrowing.
+
+```typescript
+export type TypedEffectVisitor = {
+  readonly [K in keyof OxlintVisitor]?: EffectHandler<
+    ExtractNode<Exclude<OxlintVisitor[K], undefined>>
+  >
+}
+```
+
+### VisitorNodeType
+
+Resolves a visitor key string to its narrowed ESTree node type. For known keys (e.g. `'CallExpression'`) returns the specific ESTree type; for unknown keys falls back to `ESTree.Node`.
+
+```typescript
+export type VisitorNodeType<K extends string> = K extends keyof OxlintVisitor
+  ? ExtractNode<Exclude<OxlintVisitor[K], undefined>>
+  : ESTree.Node
+```
+
+---
+
+## Visitor.on
+
+Creates a single-entry visitor that handles one node type on enter.
+
+```typescript
+export const on = <K extends string>(
+  nodeType: K,
+  handler: EffectHandler<VisitorNodeType<K>>
+): EffectVisitor
+```
+
+<ParamField path="nodeType" type="K extends string" required>
+  The ESTree node type name to handle (e.g. `'CallExpression'`, `'ThrowStatement'`). Known keys provide a narrowed node type to the handler.
+</ParamField>
+
+<ParamField path="handler" type="EffectHandler<VisitorNodeType<K>>" required>
+  The effectful handler. Receives the narrowed node type for known keys.
+</ParamField>
+
+```typescript
+import * as Ref from 'effect/Ref';
+import { Visitor, RuleContext } from 'effect-oxlint';
+
+Visitor.on('ThrowStatement', function* (node) {
+  const depth = yield* Ref.get(myDepthRef)
+  if (depth > 0) {
+    const ctx = yield* RuleContext
+    yield* ctx.report({ node, message: 'No throw inside Effect.gen' })
+  }
+})
+```
+
+---
+
+## Visitor.onExit
+
+Creates a single-entry visitor that handles one node type on exit (after all descendants have been visited).
+
+```typescript
+export const onExit = <K extends string>(
+  nodeType: K,
+  handler: EffectHandler<VisitorNodeType<K>>
+): EffectVisitor
+```
+
+<ParamField path="nodeType" type="K extends string" required>
+  The ESTree node type name. The handler is registered under `"NodeType:exit"`.
+</ParamField>
+
+<ParamField path="handler" type="EffectHandler<VisitorNodeType<K>>" required>
+  The effectful handler called when the traversal exits the node.
+</ParamField>
+
+```typescript
+// Enter increments depth, exit decrements
+const enterHandler = Visitor.on('FunctionDeclaration', (node) =>
+  Ref.update(depthRef, (n) => n + 1)
+)
+const exitHandler = Visitor.onExit('FunctionDeclaration', (node) =>
+  Ref.update(depthRef, (n) => n - 1)
+)
+
+const combined = Visitor.merge(enterHandler, exitHandler)
+```
+
+---
+
+## Visitor.merge
+
+Merges multiple visitors into one. When two visitors handle the same node type, both handlers run sequentially from left to right.
+
+```typescript
+export const merge = (
+  ...visitors: ReadonlyArray<EffectVisitor>
+): EffectVisitor
+```
+
+<ParamField path="visitors" type="ReadonlyArray<EffectVisitor>" required>
+  Any number of `EffectVisitor` maps to merge. Same-key handlers are sequenced left to right.
+</ParamField>
+
+```typescript
+import { Visitor } from 'effect-oxlint';
+
+const combined = Visitor.merge(importVisitor, memberVisitor, statementVisitor)
+```
+
+---
+
+## Visitor.tracked
+
+Creates an enter/exit visitor pair that increments a `Ref<number>` on enter and decrements on exit, but only when the predicate matches. This replaces the common `let depth = 0` mutable counter pattern.
+
+```typescript
+export const tracked = <K extends string>(
+  nodeType: K,
+  predicate: (node: VisitorNodeType<K>) => boolean,
+  ref: Ref.Ref<number>
+): EffectVisitor
+```
+
+<ParamField path="nodeType" type="K extends string" required>
+  The node type to track depth for.
+</ParamField>
+
+<ParamField path="predicate" type="(node: VisitorNodeType<K>) => boolean" required>
+  Called with the narrowed node type. Only when this returns `true` is the `Ref` updated.
+</ParamField>
+
+<ParamField path="ref" type="Ref.Ref<number>" required>
+  The depth counter ref. Incremented on enter, decremented on exit.
+</ParamField>
+
+```typescript
+import * as Ref from 'effect/Ref';
+import { AST, Visitor } from 'effect-oxlint';
+
+const effectGenDepth = yield* Ref.make(0)
+
+const tracker = Visitor.tracked(
+  'CallExpression',
+  // node is typed as ESTree.CallExpression
+  (node) => AST.isCallOf(node, 'Effect', 'gen'),
+  effectGenDepth
+)
+// effectGenDepth increments when entering Effect.gen calls,
+// decrements when exiting them
+```
+
+---
+
+## Visitor.filter
+
+Conditionally applies a visitor based on a predicate evaluated once at create time. Useful for restricting a visitor to specific files (e.g. skip test files).
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const filter: {
+  (
+    predicate: (filename: string) => boolean
+  ): (
+    visitor: EffectVisitor
+  ) => Effect.Effect<EffectVisitor, never, RuleContext>
+}
+```
+
+```typescript Data-first
+export const filter: {
+  (
+    predicate: (filename: string) => boolean,
+    visitor: EffectVisitor
+  ): Effect.Effect<EffectVisitor, never, RuleContext>
+}
+```
+
+</CodeGroup>
+
+<ParamField path="predicate" type="(filename: string) => boolean" required>
+  Receives the current file's path. Return `true` to apply the visitor, `false` to return an empty visitor.
+</ParamField>
+
+<ParamField path="visitor" type="EffectVisitor" required>
+  The visitor to apply when the predicate returns `true`.
+</ParamField>
+
+<Note>
+  `filter` returns an `Effect<EffectVisitor>` because it reads `RuleContext` to access the filename. Use `yield*` inside your `create` generator to unwrap it.
+</Note>
+
+```typescript
+// Data-first inside a create generator
+const visitor = yield* Visitor.filter(
+  (filename) => !filename.endsWith('.test.ts'),
+  mainVisitor
+)
+
+// Data-last with pipe
+const visitor = yield* pipe(
+  mainVisitor,
+  Visitor.filter((filename) => !filename.endsWith('.test.ts'))
+)
+```
+
+---
+
+## Visitor.accumulate
+
+Accumulates values during traversal and analyzes them at `Program:exit`. The `extract` function is called for each node of `nodeType`; if it returns `Option.some(value)`, that value is collected. At `Program:exit`, the `analyze` function receives all collected items.
+
+```typescript
+export const accumulate = <A>(
+  nodeType: string,
+  extract: (node: ESTree.Node) => Option.Option<A>,
+  analyze: (
+    items: ReadonlyArray<A>
+  ) => Effect.Effect<void, never, RuleContext>
+): Effect.Effect<EffectVisitor, never, RuleContext>
+```
+
+<ParamField path="nodeType" type="string" required>
+  The AST node type to extract values from during traversal.
+</ParamField>
+
+<ParamField path="extract" type="(node: ESTree.Node) => Option.Option<A>" required>
+  Called for each matching node. Return `Option.some(value)` to accumulate a value, or `Option.none()` to skip.
+</ParamField>
+
+<ParamField path="analyze" type="(items: ReadonlyArray<A>) => Effect.Effect<void, never, RuleContext>" required>
+  Called once at `Program:exit` with all accumulated values. Report diagnostics here.
+</ParamField>
+
+<Note>
+  `accumulate` returns an `Effect<EffectVisitor>` because it creates a `Ref` internally. Use `yield*` inside your `create` generator to unwrap it.
+</Note>
+
+```typescript
+import { Visitor, AST } from 'effect-oxlint';
+
+const visitor = yield* Visitor.accumulate(
+  'ExportNamedDeclaration',
+  (node) => AST.narrow(node, 'ExportNamedDeclaration').pipe(
+    Option.map((n) => n.declaration)
+  ),
+  function* (declarations) {
+    // All export declarations collected — analyze them at end of file
+    for (const decl of declarations) {
+      // report diagnostics based on the full set
+    }
+  }
+)
+```

@@ -1,0 +1,134 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "effect-oxlint",
+  "projectDescription": "An Effect v4-first library for writing oxlint custom lint rules with typed AST matchers, composable visitors, and structured diagnostics.",
+  "theme": "luma",
+  "primaryColor": "#241c24",
+  "lightColor": "#f4f4f4",
+  "darkColor": "#cb0404",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/writing-rules",
+              "guides/visitor-combinators",
+              "guides/ast-matching",
+              "guides/diagnostics-autofixes",
+              "guides/testing"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/effect-patterns",
+              "concepts/error-channel",
+              "concepts/plugin-assembly"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core",
+            "pages": [
+              "api/rule",
+              "api/visitor",
+              "api/ast",
+              "api/diagnostic"
+            ]
+          },
+          {
+            "group": "Context & Source",
+            "pages": [
+              "api/rule-context",
+              "api/source-code",
+              "api/scope"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/plugin",
+              "api/comment",
+              "api/token",
+              "api/testing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Rule.define with Effect generator — write create as an Effect.gen function with yield* for Ref state, RuleContext access, and visitor setup",
+    "Convenience rule factories — Rule.banMember, Rule.banImport, Rule.banCallOf, Rule.banNewExpr, Rule.banStatement, Rule.banCallOfMember, Rule.banMultiple",
+    "Composable Visitor combinators — on, onExit, merge, tracked (Ref-based depth counter), filter (filename predicate), accumulate (collect-then-analyze)",
+    "Option-returning AST matchers with dual API — matchMember, matchCallOf, matchImport, narrow, memberPath, findAncestor, hasAncestor",
+    "Structured Diagnostic builders with composable autofixes — make, withFix, replaceText, insertBefore, insertAfter, composeFixes",
+    "Effectful SourceCode and Scope queries — 25+ wrapped methods returning Effect<T, never, RuleContext>",
+    "Testing module (effect-oxlint/testing) — 50+ AST node builders, runRule, runRuleMulti, expectDiagnostics, expectNoDiagnostics",
+    "Plugin.define and Plugin.merge for assembling rules into oxlint-compatible plugins",
+    "Ships as TypeScript source (no compiled dist/) — works with Bun, Deno/JSR, and any TypeScript-aware bundler"
+  ],
+  "publicApiSurface": [
+    "Rule.define(config: RuleConfig): CreateRule",
+    "Rule.meta(opts): RuleMeta",
+    "Rule.banMember(obj, prop, opts): CreateRule",
+    "Rule.banImport(source, opts): CreateRule",
+    "Rule.banCallOf(name, opts): CreateRule",
+    "Rule.banCallOfMember(obj, prop, opts): CreateRule",
+    "Rule.banNewExpr(name, opts): CreateRule",
+    "Rule.banStatement(nodeType, opts): CreateRule",
+    "Rule.banMultiple(spec: BanMultipleSpec, opts): CreateRule",
+    "Visitor.on(nodeType, handler): EffectVisitor",
+    "Visitor.onExit(nodeType, handler): EffectVisitor",
+    "Visitor.merge(...visitors): EffectVisitor",
+    "Visitor.tracked(nodeType, predicate, ref): EffectVisitor",
+    "Visitor.filter(predicate, visitor): Effect<EffectVisitor>",
+    "Visitor.accumulate(nodeType, extract, analyze): Effect<EffectVisitor>",
+    "AST.matchMember(node, obj, prop): Option<StaticMemberExpression>",
+    "AST.matchCallOf(node, obj, prop): Option<CallExpression>",
+    "AST.matchImport(node, source): Option<ImportDeclaration>",
+    "AST.narrow(node, type): Option<Node>",
+    "AST.memberPath(node): Option<NonEmptyArray<string>>",
+    "AST.findAncestor(node, type): Option<Node>",
+    "AST.hasAncestor(node, type): boolean",
+    "AST.calleeName(node): Option<string>",
+    "AST.calleeIdentifier(node): Option<string>",
+    "AST.memberNames(node): Option<[string, string]>",
+    "AST.objectKeys(node): ReadonlyArray<string>",
+    "AST.objectGetValue(node, key): Option<Expression>",
+    "Diagnostic.make(opts): OxlintDiagnostic",
+    "Diagnostic.withFix(diag, fix): OxlintDiagnostic",
+    "Diagnostic.replaceText(node, text): FixFn",
+    "Diagnostic.insertBefore(node, text): FixFn",
+    "Diagnostic.insertAfter(node, text): FixFn",
+    "Diagnostic.composeFixes(...fixes): FixFn",
+    "RuleContext (Effect service) — .filename, .cwd, .report, .sourceCode, .options",
+    "SourceCode.getText(): Effect<string>",
+    "SourceCode.getNodeText(node): Effect<string>",
+    "Scope.findVariable(scope, name): Option<Variable>",
+    "Scope.findVariableUp(scope, name): Option<Variable>",
+    "Plugin.define(opts): OxlintPlugin",
+    "Plugin.merge(...plugins): OxlintPlugin",
+    "Testing.runRule(rule, visitor, node): ReadonlyArray<ReportedDiagnostic>",
+    "Testing.runRuleMulti(rule, pairs): ReadonlyArray<ReportedDiagnostic>",
+    "Testing.expectDiagnostics(result, expected): void",
+    "Testing.expectNoDiagnostics(result): void",
+    "Testing.createMockContext(opts): { context, diagnostics }",
+    "Testing.mockRuleContextLayer(opts): Layer<RuleContext>"
+  ]
+}

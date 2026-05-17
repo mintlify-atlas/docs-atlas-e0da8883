@@ -1,0 +1,834 @@
+---
+title: "Testing module API reference"
+description: "Complete reference for the effect-oxlint/testing subpath — rule runners, assertion helpers, mock context factories, and every AST node builder."
+---
+
+The `Testing` module is a dedicated subpath export (`effect-oxlint/testing`) that provides everything you need to test Effect-first oxlint rules without a real oxlint process. It includes runners that execute a rule against a single mock AST node, assertion helpers that produce readable errors on mismatch, a mock `RuleContext` factory for `it.effect` tests, and a large set of AST node builders that produce structurally correct mock nodes without any file parsing.
+
+```ts
+import * as Testing from 'effect-oxlint/testing'
+```
+
+---
+
+## Rule runners
+
+### `Testing.runRule`
+
+Runs a rule with a single visitor event and returns the collected diagnostics.
+
+```ts
+export const runRule = (
+  rule: CreateRule,
+  visitor: string,
+  visitorNode: unknown,
+  opts?: MockContextOptions
+): ReadonlyArray<ReportedDiagnostic>
+```
+
+<ParamField path="rule" type="CreateRule" required>
+  The rule creator returned by `Rule.define`.
+</ParamField>
+
+<ParamField path="visitor" type="string" required>
+  The visitor key to fire (e.g., `"ThrowStatement"`, `"CallExpression"`).
+</ParamField>
+
+<ParamField path="visitorNode" type="unknown" required>
+  The AST node to pass to the visitor handler. Use any of the node builders in this module.
+</ParamField>
+
+<ParamField path="opts" type="MockContextOptions">
+  Optional mock context options. See `MockContextOptions` below.
+</ParamField>
+
+<ResponseField name="ReadonlyArray<ReportedDiagnostic>" type="array">
+  All diagnostics reported by the rule during this visitor call.
+</ResponseField>
+
+```ts
+const result = Testing.runRule(myRule, 'ThrowStatement', Testing.throwStmt())
+Testing.expectDiagnostics(result, [{ message: 'No throw in Effect.gen' }])
+```
+
+---
+
+### `Testing.runRuleMulti`
+
+Runs a rule with multiple visitor/node pairs sequentially on a shared context. Use this when your rule tracks state across multiple visitor calls.
+
+```ts
+export const runRuleMulti = (
+  rule: CreateRule,
+  pairs: ReadonlyArray<readonly [visitor: string, node: unknown]>,
+  opts?: MockContextOptions
+): ReadonlyArray<ReportedDiagnostic>
+```
+
+<ParamField path="rule" type="CreateRule" required>
+  The rule creator returned by `Rule.define`.
+</ParamField>
+
+<ParamField path="pairs" type="ReadonlyArray<readonly [visitor: string, node: unknown]>" required>
+  An array of `[visitorKey, node]` tuples. The rule's `create` function is called once, and each pair is dispatched in order to the same visitor object.
+</ParamField>
+
+<ParamField path="opts" type="MockContextOptions">
+  Optional mock context options.
+</ParamField>
+
+<ResponseField name="ReadonlyArray<ReportedDiagnostic>" type="array">
+  All diagnostics reported across all visitor calls.
+</ResponseField>
+
+```ts
+// Test a rule that uses Ref to count nested function depth
+const result = Testing.runRuleMulti(depthRule, [
+  ['FunctionDeclaration', Testing.astNode('FunctionDeclaration')],
+  ['ArrowFunctionExpression', Testing.arrowFn()],
+  ['ArrowFunctionExpression:exit', Testing.arrowFn()],
+  ['FunctionDeclaration:exit', Testing.astNode('FunctionDeclaration')],
+])
+```
+
+---
+
+## Assertion helpers
+
+### `Testing.expectDiagnostics`
+
+Asserts that the diagnostics in `result` match `expected`. Each matcher is checked partially — only provided fields (`message` or `messageId`) are compared, so you do not need to specify every field on a diagnostic.
+
+```ts
+export const expectDiagnostics = (
+  result: ReadonlyArray<ReportedDiagnostic>,
+  expected: ReadonlyArray<{
+    readonly message?: string;
+    readonly messageId?: string;
+  }>
+): void
+```
+
+Throws an error if the count does not match or if any provided field does not match. The error message lists all actual diagnostics for easy debugging.
+
+<ParamField path="result" type="ReadonlyArray<ReportedDiagnostic>" required>
+  The result returned by `runRule` or `runRuleMulti`.
+</ParamField>
+
+<ParamField path="expected" type="ReadonlyArray<{ message?: string; messageId?: string }>" required>
+  The expected diagnostic patterns. Order must match the order diagnostics were reported.
+</ParamField>
+
+```ts
+Testing.expectDiagnostics(result, [
+  { message: 'No throw in Effect.gen' },
+  { messageId: 'noTryCatch' }
+])
+```
+
+---
+
+### `Testing.expectNoDiagnostics`
+
+Asserts that no diagnostics were reported. Throws an error listing all actual diagnostics if any exist.
+
+```ts
+export const expectNoDiagnostics = (
+  result: ReadonlyArray<ReportedDiagnostic>
+): void
+```
+
+<ParamField path="result" type="ReadonlyArray<ReportedDiagnostic>" required>
+  The result returned by `runRule` or `runRuleMulti`.
+</ParamField>
+
+```ts
+const result = Testing.runRule(myRule, 'Identifier', Testing.id('foo'))
+Testing.expectNoDiagnostics(result)
+```
+
+---
+
+### `Testing.messages`
+
+Extracts the diagnostic messages from a result array. Returns `Option.some(message)` for diagnostics that use `message`, and `Option.none()` for diagnostics that use `messageId` or have a `null` message.
+
+```ts
+export const messages = (
+  result: ReadonlyArray<ReportedDiagnostic>
+): ReadonlyArray<Option.Option<string>>
+```
+
+<ParamField path="result" type="ReadonlyArray<ReportedDiagnostic>" required>
+  The result returned by `runRule` or `runRuleMulti`.
+</ParamField>
+
+<ResponseField name="ReadonlyArray<Option.Option<string>>" type="array">
+  One `Option<string>` per diagnostic.
+</ResponseField>
+
+```ts
+import * as Option from 'effect/Option'
+
+const result = Testing.runRule(rule, 'ThrowStatement', Testing.throwStmt())
+expect(Testing.messages(result)).toEqual([Option.some('Use Effect.fail instead')])
+```
+
+---
+
+### `Testing.messageIds`
+
+Extracts the diagnostic `messageId` values from a result array. Returns `Option.some(messageId)` for diagnostics that use `messageId`, and `Option.none()` for those that use `message` or have a `null` messageId.
+
+```ts
+export const messageIds = (
+  result: ReadonlyArray<ReportedDiagnostic>
+): ReadonlyArray<Option.Option<string>>
+```
+
+<ParamField path="result" type="ReadonlyArray<ReportedDiagnostic>" required>
+  The result returned by `runRule` or `runRuleMulti`.
+</ParamField>
+
+<ResponseField name="ReadonlyArray<Option.Option<string>>" type="array">
+  One `Option<string>` per diagnostic.
+</ResponseField>
+
+---
+
+## Mock context
+
+### `Testing.createMockContext`
+
+Creates a mock oxlint `Context` object and a mutable diagnostics array. The mock provides the minimal surface required by `fromOxlintContext` in `RuleContext`.
+
+```ts
+export const createMockContext = (opts?: MockContextOptions): {
+  context: OxlintContext;
+  diagnostics: Array<ReportedDiagnostic>;
+}
+```
+
+<ParamField path="opts" type="MockContextOptions">
+  Optional configuration for the mock context. All fields are optional.
+</ParamField>
+
+<ResponseField name="context" type="OxlintContext">
+  A fully-shaped mock `Context` object with stubbed `sourceCode` methods and the provided options applied.
+</ResponseField>
+
+<ResponseField name="diagnostics" type="Array<ReportedDiagnostic>">
+  A mutable array that collects every `report()` call made through `context.report`.
+</ResponseField>
+
+#### `MockContextOptions`
+
+```ts
+export interface MockContextOptions {
+  readonly filename?: string;
+  readonly cwd?: string;
+  readonly options?: ReadonlyArray<unknown>;
+  readonly sourceText?: string;
+  readonly comments?: ReadonlyArray<Comment>;
+}
+```
+
+<ParamField path="filename" type="string">
+  The mock filename. Defaults to `"/test/file.ts"`.
+</ParamField>
+
+<ParamField path="cwd" type="string">
+  The mock current working directory. Defaults to `"/test"`.
+</ParamField>
+
+<ParamField path="options" type="ReadonlyArray<unknown>">
+  Rule options array, as passed via oxlint config. Defaults to `[]`.
+</ParamField>
+
+<ParamField path="sourceText" type="string">
+  The mock source text returned by `sourceCode.getText()`. Defaults to `""`.
+</ParamField>
+
+<ParamField path="comments" type="ReadonlyArray<Comment>">
+  Comments returned by `sourceCode.getAllComments()`. Defaults to `[]`.
+</ParamField>
+
+---
+
+### `Testing.mockRuleContextLayer`
+
+Creates an Effect `Layer` that provides a mock `RuleContext` service. Use this in `it.effect` tests that need to `yield*` visitor handlers (which have `RuleContext` in their requirements).
+
+```ts
+export const mockRuleContextLayer = (
+  opts?: MockContextOptions
+): Layer.Layer<RuleContext>
+```
+
+<ParamField path="opts" type="MockContextOptions">
+  Optional mock context options passed to `createMockContext`.
+</ParamField>
+
+<ResponseField name="Layer.Layer<RuleContext>" type="Layer">
+  A layer that provides the `RuleContext` service backed by the mock context.
+</ResponseField>
+
+```ts
+import { it } from '@effect/vitest'
+import * as Effect from 'effect/Effect'
+import { Testing } from 'effect-oxlint'
+
+it.effect('visitor handler reports for matching node', () =>
+  Effect.gen(function* () {
+    // yield* the handler directly — it requires RuleContext
+    yield* myVisitorHandler(Testing.throwStmt())
+    // assertions...
+  }).pipe(Effect.provide(Testing.mockRuleContextLayer()))
+)
+```
+
+---
+
+### `Testing.withMockRuleContext`
+
+Provides a mock `RuleContext` to an effect without explicitly constructing a layer.
+
+```ts
+export const withMockRuleContext = <A, E>(
+  effect: Effect.Effect<A, E, RuleContext>,
+  opts?: MockContextOptions
+): Effect.Effect<A, E>
+```
+
+<ParamField path="effect" type="Effect.Effect<A, E, RuleContext>" required>
+  An effect that requires `RuleContext`.
+</ParamField>
+
+<ParamField path="opts" type="MockContextOptions">
+  Optional mock context options.
+</ParamField>
+
+<ResponseField name="Effect.Effect<A, E>" type="Effect">
+  The same effect with `RuleContext` satisfied by a mock instance.
+</ResponseField>
+
+---
+
+## AST node builders
+
+All builders return fully-shaped mock AST node objects that satisfy the type shapes expected by the `AST`, `Visitor`, and `Rule` modules. Pass them directly to `runRule` or `runRuleMulti`.
+
+<AccordionGroup>
+
+<Accordion title="Identifiers and member expressions">
+
+**`Testing.id`** — `Identifier`: `{ type: "Identifier", name }`
+
+```ts
+export const id = (name: string): ESTree.IdentifierName
+```
+
+**`Testing.memberExpr`** — `MemberExpression`: `obj.prop` (non-computed)
+
+```ts
+export const memberExpr = (obj: string, prop: string): ESTree.MemberExpression
+```
+
+**`Testing.computedMemberExpr`** — `MemberExpression`: `obj[prop]` (computed)
+
+```ts
+export const computedMemberExpr = (obj: string, prop: string): ESTree.MemberExpression
+```
+
+**`Testing.chainedMemberExpr`** — Chained `MemberExpression`: `a.b.c`
+
+```ts
+export const chainedMemberExpr = (
+  ...names: readonly [string, string, ...ReadonlyArray<string>]
+): ESTree.MemberExpression
+```
+
+Requires at least two names. Builds left-associative member access.
+
+</Accordion>
+
+<Accordion title="Call and new expressions">
+
+**`Testing.callExpr`** — `CallExpression` with bare identifier callee: `name(args)`
+
+```ts
+export const callExpr = (
+  name: string,
+  args: ReadonlyArray<unknown> = []
+): ESTree.CallExpression
+```
+
+**`Testing.callOfMember`** — `CallExpression` with `MemberExpression` callee: `obj.prop(args)`
+
+```ts
+export const callOfMember = (
+  obj: string,
+  prop: string,
+  args: ReadonlyArray<unknown> = []
+): ESTree.CallExpression
+```
+
+**`Testing.newExpr`** — `NewExpression`: `new callee(args)`
+
+```ts
+export const newExpr: {
+  (callee: string, args?: ReadonlyArray<unknown>): ESTree.NewExpression;
+  (callee: unknown, args?: ReadonlyArray<unknown>): ESTree.NewExpression;
+}
+```
+
+When `callee` is a string it is automatically wrapped in `id()`, so `newExpr('Date')` and `newExpr(id('Date'))` are equivalent.
+
+</Accordion>
+
+<Accordion title="Literals">
+
+**`Testing.strLiteral`** — `StringLiteral`: `{ type: "Literal", value }`
+
+```ts
+export const strLiteral = (value: string): ESTree.StringLiteral
+```
+
+**`Testing.numLiteral`** — `NumericLiteral`: `{ type: "Literal", value }`
+
+```ts
+export const numLiteral = (value: number): ESTree.NumericLiteral
+```
+
+**`Testing.boolLiteral`** — `BooleanLiteral`: `{ type: "Literal", value }`
+
+```ts
+export const boolLiteral = (value: boolean): ESTree.BooleanLiteral
+```
+
+</Accordion>
+
+<Accordion title="Object expressions">
+
+**`Testing.objectExpr`** — `ObjectExpression` with identifier-keyed properties
+
+```ts
+export const objectExpr = (
+  properties: ReadonlyArray<{
+    readonly key: string;
+    readonly value?: unknown;
+  }>
+): ESTree.ObjectExpression
+```
+
+Keys are wrapped in `id()`. Omitted `value` defaults to `strLiteral("")`.
+
+**`Testing.objectExprLiteralKeys`** — `ObjectExpression` with string literal keys
+
+```ts
+export const objectExprLiteralKeys = (
+  properties: ReadonlyArray<{
+    readonly key: string;
+    readonly value?: unknown;
+  }>
+): ESTree.ObjectExpression
+```
+
+Keys are wrapped in `strLiteral()` instead of `id()`.
+
+**`Testing.objectExprWithSpread`** — `ObjectExpression` with a single `SpreadElement`
+
+```ts
+export const objectExprWithSpread = (spreadArg: unknown): ESTree.ObjectExpression
+```
+
+</Accordion>
+
+<Accordion title="Statements">
+
+**`Testing.throwStmt`** — `ThrowStatement`
+
+```ts
+export const throwStmt = (): ESTree.ThrowStatement
+```
+
+**`Testing.tryStmt`** — `TryStatement`
+
+```ts
+export const tryStmt = (): ESTree.Node
+```
+
+**`Testing.returnStmt`** — `ReturnStatement`
+
+```ts
+export const returnStmt = (argument?: unknown): ESTree.ReturnStatement
+```
+
+`argument` defaults to `null`.
+
+**`Testing.blockStmt`** — `BlockStatement`
+
+```ts
+export const blockStmt = (body: ReadonlyArray<unknown> = []): ESTree.BlockStatement
+```
+
+**`Testing.exprStmt`** — `ExpressionStatement`
+
+```ts
+export const exprStmt = (expression: unknown): ESTree.ExpressionStatement
+```
+
+**`Testing.ifStmt`** — `IfStatement`
+
+```ts
+export const ifStmt = (
+  test?: unknown,
+  consequent?: unknown,
+  alternate?: unknown
+): ESTree.IfStatement
+```
+
+All parameters are optional. `ifStmt()` produces `{ type: "IfStatement" }` with all fields set to `null`, suitable for enter/exit tracking.
+
+**`Testing.switchStmt`** — `SwitchStatement`
+
+```ts
+export const switchStmt = (): ESTree.SwitchStatement
+```
+
+**`Testing.forStmt`** — `ForStatement`
+
+```ts
+export const forStmt = (): ESTree.ForStatement
+```
+
+**`Testing.forInStmt`** — `ForInStatement`
+
+```ts
+export const forInStmt = (): ESTree.ForInStatement
+```
+
+**`Testing.forOfStmt`** — `ForOfStatement`
+
+```ts
+export const forOfStmt = (): ESTree.ForOfStatement
+```
+
+**`Testing.whileStmt`** — `WhileStatement`
+
+```ts
+export const whileStmt = (): ESTree.WhileStatement
+```
+
+**`Testing.doWhileStmt`** — `DoWhileStatement`
+
+```ts
+export const doWhileStmt = (): ESTree.DoWhileStatement
+```
+
+</Accordion>
+
+<Accordion title="Expressions">
+
+**`Testing.arrowFn`** — `ArrowFunctionExpression`
+
+```ts
+export const arrowFn = (
+  body?: unknown,
+  params: ReadonlyArray<unknown> = []
+): ESTree.ArrowFunctionExpression
+```
+
+`body` defaults to `blockStmt()`.
+
+**`Testing.binaryExpr`** — `BinaryExpression`
+
+```ts
+export const binaryExpr = (
+  operator: string,
+  left: unknown,
+  right: unknown
+): ESTree.BinaryExpression
+```
+
+**`Testing.yieldExpr`** — `YieldExpression`
+
+```ts
+export const yieldExpr = (
+  argument?: unknown,
+  delegate: boolean = false
+): ESTree.YieldExpression
+```
+
+`argument` defaults to `null`.
+
+**`Testing.unaryExpr`** — `UnaryExpression`
+
+```ts
+export const unaryExpr = (operator: string, argument: unknown): ESTree.UnaryExpression
+```
+
+Always sets `prefix: true`.
+
+</Accordion>
+
+<Accordion title="Declarations and imports">
+
+**`Testing.varDecl`** — `VariableDeclaration`: `const/let/var name = init`
+
+```ts
+export const varDecl = (
+  kind: 'const' | 'let' | 'var',
+  name: string,
+  init?: unknown
+): ESTree.VariableDeclaration
+```
+
+**`Testing.varDeclarator`** — `VariableDeclarator` (standalone, without wrapping declaration)
+
+```ts
+export const varDeclarator = (name: string, init?: unknown): ESTree.VariableDeclarator
+```
+
+**`Testing.exportNamedDecl`** — `ExportNamedDeclaration`
+
+```ts
+export const exportNamedDecl = (declaration?: unknown): ESTree.ExportNamedDeclaration
+```
+
+**`Testing.importDecl`** — `ImportDeclaration` with no specifiers: `import ... from "source"`
+
+```ts
+export const importDecl = (source: string): ESTree.ImportDeclaration
+```
+
+**`Testing.importDeclWithSpecifiers`** — `ImportDeclaration` with specifiers
+
+```ts
+export const importDeclWithSpecifiers = (
+  source: string,
+  specifiers: ReadonlyArray<unknown>,
+  importKind: string = 'value'
+): ESTree.ImportDeclaration
+```
+
+**`Testing.importSpecifier`** — `ImportSpecifier`: `{ imported as local }`
+
+```ts
+export const importSpecifier = (
+  imported: string,
+  local?: string,
+  importKind: string = 'value'
+): ESTree.ImportSpecifier
+```
+
+`local` defaults to `imported` when omitted.
+
+**`Testing.importNamespaceSpecifier`** — `ImportNamespaceSpecifier`: `* as local`
+
+```ts
+export const importNamespaceSpecifier = (local: string): ESTree.ImportNamespaceSpecifier
+```
+
+</Accordion>
+
+<Accordion title="Class nodes">
+
+**`Testing.classDecl`** — `ClassDeclaration`
+
+```ts
+export const classDecl = (
+  name: string,
+  opts: {
+    readonly superClass?: unknown;
+    readonly members?: ReadonlyArray<unknown>;
+  } = {}
+): ESTree.Class
+```
+
+```ts
+// Simple: class Foo {}
+Testing.classDecl('Foo')
+
+// With super: class Foo extends Bar {}
+Testing.classDecl('Foo', { superClass: Testing.id('Bar') })
+
+// With members: class Foo { x; static y() {} }
+Testing.classDecl('Foo', {
+  members: [Testing.propertyDef('x'), Testing.methodDef('y', true)]
+})
+```
+
+**`Testing.propertyDef`** — `PropertyDefinition` (class field)
+
+```ts
+export const propertyDef = (name: string, isStatic: boolean = false): ESTree.PropertyDefinition
+```
+
+**`Testing.methodDef`** — `MethodDefinition` (class method)
+
+```ts
+export const methodDef = (name: string, isStatic: boolean = false): ESTree.MethodDefinition
+```
+
+</Accordion>
+
+<Accordion title="TypeScript nodes">
+
+**`Testing.tsAsExpr`** — `TSAsExpression`: `expr as Type`
+
+```ts
+export const tsAsExpr = (
+  typeKind: string,
+  parent?: { readonly type: string; readonly parent?: unknown }
+): ESTree.TSAsExpression
+```
+
+The expression is always `id('_')`. The type annotation is `{ type: typeKind }`.
+
+**`Testing.tsUnionType`** — `TSUnionType`: `A | B | C`
+
+```ts
+export const tsUnionType = (typeKinds: ReadonlyArray<string>): ESTree.TSUnionType
+```
+
+**`Testing.tsTypeRef`** — `TSTypeReference`: `TypeName`
+
+```ts
+export const tsTypeRef = (name: string): ESTree.TSTypeReference
+```
+
+**`Testing.tsTypeLiteral`** — `TSTypeLiteral`: `{ ... }` with N `TSPropertySignature` members
+
+```ts
+export const tsTypeLiteral = (memberCount: number): ESTree.TSTypeLiteral
+```
+
+**`Testing.interfaceDecl`** — `TSInterfaceDeclaration`: `interface Name { }`
+
+```ts
+export const interfaceDecl = (name: string): ESTree.TSInterfaceDeclaration
+```
+
+**`Testing.typeAliasDecl`** — `TSTypeAliasDeclaration`: `type Name = ...`
+
+```ts
+export const typeAliasDecl = (name: string): ESTree.TSTypeAliasDeclaration
+```
+
+</Accordion>
+
+<Accordion title="Generic node builders">
+
+**`Testing.astNode`** — Generic AST node with type and optional parent pointer
+
+```ts
+export const astNode = (
+  type: string,
+  parent?: { readonly type: string; readonly parent?: unknown }
+): { readonly type: string; readonly parent?: unknown }
+```
+
+**`Testing.withParentChain`** — Build a parent chain from outermost to innermost
+
+```ts
+export const withParentChain = (
+  first: string,
+  ...rest: ReadonlyArray<string>
+): { readonly type: string; readonly parent?: unknown }
+```
+
+Returns the innermost node with `.parent` links set on each ancestor.
+
+```ts
+// FunctionDeclaration → BlockStatement → ThrowStatement
+const node = Testing.withParentChain('FunctionDeclaration', 'BlockStatement', 'ThrowStatement')
+// node.type === 'ThrowStatement'
+// node.parent.type === 'BlockStatement'
+// node.parent.parent.type === 'FunctionDeclaration'
+```
+
+**`Testing.program`** — `Program` node
+
+```ts
+export const program = (
+  body: ReadonlyArray<unknown> = [],
+  comments: ReadonlyArray<unknown> = []
+): ESTree.Program
+```
+
+Always sets `sourceType: "module"`.
+
+</Accordion>
+
+<Accordion title="Tokens, comments, scope, and variables">
+
+**`Testing.token`** — Mock `Token`
+
+```ts
+export const token = (type: Token['type'], value: string): Token
+```
+
+Produces a token with `start: 0`, `end: value.length`, and matching `range` and `loc`.
+
+**`Testing.comment`** — Mock `Comment`
+
+```ts
+export const comment = (type: Comment['type'], value: string): Comment
+```
+
+Produces a comment with `start: 0`, `end: value.length + 4` (accounts for delimiters), and matching `range` and `loc`.
+
+**`Testing.scope`** — Mock `Scope`
+
+```ts
+export const scope = (
+  opts: {
+    readonly type?: OxlintScope['type'];
+    readonly isStrict?: boolean;
+    readonly variables?: ReadonlyArray<Variable>;
+    readonly upper?: OxlintScope | null;
+  } = {}
+): OxlintScope
+```
+
+Defaults: `type: "function"`, `isStrict: false`, `upper: null`, no variables.
+
+**`Testing.variable`** — Mock `Variable`
+
+```ts
+export const variable = (
+  name: string,
+  opts: {
+    readonly references?: ReadonlyArray<{
+      readonly isRead: () => boolean;
+      readonly isWrite: () => boolean;
+      readonly isReadOnly: () => boolean;
+      readonly isWriteOnly: () => boolean;
+      readonly isReadWrite: () => boolean;
+    }>;
+  } = {}
+): Variable
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Types
+
+### `ReportedDiagnostic`
+
+A single collected diagnostic from the mock context's `report` function.
+
+```ts
+export interface ReportedDiagnostic {
+  readonly diagnostic: OxlintDiagnostic;
+}
+```
+
+<Note>
+  The `Testing` module is only available from the `effect-oxlint/testing` subpath export. It is not included in the main `effect-oxlint` barrel to avoid pulling test infrastructure into production bundles.
+</Note>

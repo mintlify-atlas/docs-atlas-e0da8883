@@ -1,0 +1,108 @@
+---
+title: "Handler error channel and fallible effects"
+description: "Why effect-oxlint handlers carry error channel `never`, what that means in practice, and how to safely handle fallible sub-effects inside a rule."
+---
+
+Every visitor handler in `effect-oxlint` — and the `create` generator itself — carries a fixed error channel of `never`. This is not an arbitrary constraint; it follows directly from how oxlint's plugin API works and how `effect-oxlint` bridges it with Effect. Understanding this constraint helps you write rules that are both correct and resilient.
+
+## Why the error channel is `never`
+
+oxlint's plugin API is synchronous. When `Rule.define` converts an effectful visitor into a plain oxlint visitor, it does so using `Effect.runSync` at the FFI boundary. `Effect.runSync` can execute synchronous effects and return their results, but it has no mechanism to surface a typed `Effect.fail` — if the running effect fails, `Effect.runSync` throws an uncaught exception, which would crash the linter for the entire file being processed.
+
+To make this contract explicit, the `EffectHandler` type enforces `never` as the error channel:
+
+```ts
+// From src/Visitor.ts
+export type EffectHandler<N = ESTree.Node> = (
+  node: N
+) => Effect.Effect<void, never, RuleContext>;
+```
+
+The same constraint applies to the `create` generator in `Rule.define`:
+
+```ts
+// The create field signature from RuleConfig
+readonly create: (
+  options: Options
+) => Effect.gen.Return<TypedEffectVisitor, never, RuleContext>;
+```
+
+Both `create` and each handler must have error type `never` at the type level, which TypeScript enforces at compile time.
+
+## What this means in practice
+
+You cannot use `Effect.fail` directly in a handler or let an error propagate upward uncaught. Any sub-effect that can fail must have its failure handled inside the handler before the `Effect.Effect<void, never, RuleContext>` is returned.
+
+<Note>
+Typed failures (`Effect.fail`) must be caught. Defects (`Effect.die`, thrown exceptions) propagate out of `Effect.runSync` and are not caught at the handler boundary — reserve them for genuine invariant violations.
+</Note>
+
+## Handling fallible sub-effects
+
+The recommended pattern is to catch the failure inside the handler and surface it as a diagnostic using `ctx.report`. This turns a potential crash into a visible lint message, which is far more useful to the rule consumer.
+
+```ts
+import * as Effect from 'effect/Effect';
+import type { ESTree } from 'effect-oxlint';
+import { RuleContext, Diagnostic } from 'effect-oxlint';
+
+create: function* () {
+  const ctx = yield* RuleContext;
+
+  const handler = (node: ESTree.Node) =>
+    fallibleEffect(node).pipe(
+      Effect.catch(() =>
+        ctx.report(
+          Diagnostic.make({ node, message: 'could not analyse node' })
+        )
+      )
+    );
+
+  return { CallExpression: handler };
+}
+```
+
+`Effect.catch` receives the typed error value and must return an `Effect<void, never, RuleContext>`. Because `ctx.report` satisfies that type, the catch handler can be a direct call with a descriptive message.
+
+<Tip>
+If you want to silently swallow a failure with no diagnostic, return `Effect.void` from the catch handler instead of calling `ctx.report`.
+</Tip>
+
+## Where Effect.runSync is called
+
+`Effect.runSync` appears in exactly two places inside `Rule.define` (in `src/Rule.ts`):
+
+<Steps>
+  <Step title="Once per file — running create">
+    When oxlint begins linting a new file, it calls the `create` function on every registered rule. `Rule.define` runs the `create` generator via `Effect.runSync`, allocating all `Ref` state and building the visitor map. The `RuleContext` service is provided before `runSync` is called, so `yield* RuleContext` inside `create` always succeeds.
+  </Step>
+  <Step title="Once per node — running each handler">
+    After `create` returns the visitor map, `Rule.define` wraps every handler so that when oxlint visits a node, the returned `Effect<void, never, RuleContext>` is executed immediately via `Effect.runSync`. `RuleContext` is provided here too, so handlers have full access to `ctx.report`, `ctx.filename`, and `ctx.sourceCode`.
+  </Step>
+</Steps>
+
+You never call `Effect.runSync` yourself. It is internal infrastructure in `Rule.define` — an implementation detail of the FFI bridge.
+
+## Defects vs. typed failures
+
+Effect distinguishes two kinds of failures:
+
+| Kind | How produced | Caught by `Effect.catch`? |
+|---|---|---|
+| Typed failure | `Effect.fail(error)` | Yes |
+| Defect | `Effect.die(cause)` or thrown exception | No |
+
+The `never` error channel constraint prevents typed failures from escaping handlers. Defects, on the other hand, are not caught at the handler boundary and will propagate out of `Effect.runSync`, crashing the linter for the current file. Reserve defects for situations that genuinely represent a bug — not for expected runtime conditions like a missing AST node or an absent import.
+
+## Note on test files
+
+Rule test files are allowed to use `throw` and `try/catch` because `effect-oxlint`'s oxlint configuration explicitly disables the `avoid-untagged-errors` and `avoid-try-catch` lint rules for test files. This is a deliberate exception to the domain-code rule that all errors should be typed Effect failures.
+
+<CardGroup cols={2}>
+  <Card title="Effect patterns" icon="code" href="/concepts/effect-patterns">
+    The full set of Effect idioms used in effect-oxlint rules.
+  </Card>
+  <Card title="Assembling a plugin" icon="puzzle-piece" href="/concepts/plugin-assembly">
+    How to collect your rules into an oxlint plugin with `Plugin.define`.
+  </Card>
+</CardGroup>

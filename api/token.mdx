@@ -1,0 +1,237 @@
+---
+title: "Token module API reference"
+description: "Type predicates and accessors for oxlint tokens — isKeyword, isPunctuator with dual API, plus isIdentifier, isString, isNumeric, isBoolean, and more."
+---
+
+The `Token` module provides boolean predicates and accessors for working with oxlint `Token` nodes. Tokens are the lexical units that oxlint's parser emits — keywords, identifiers, punctuators, string literals, and more. Two predicates (`isKeyword` and `isPunctuator`) support the dual API pattern, which lets you use them both data-first and data-last for pipe composition.
+
+## Dual API predicates
+
+### `Token.isKeyword`
+
+Returns `true` if the token is a keyword with the given value.
+
+```ts
+export const isKeyword: {
+  (keyword: string): (token: Token) => boolean;
+  (token: Token, keyword: string): boolean;
+}
+```
+
+Both call styles are equivalent:
+
+```ts
+// Data-first
+Token.isKeyword(token, 'const')   // true if keyword "const"
+Token.isKeyword(token, 'return')  // true if keyword "return"
+
+// Data-last (pipe-friendly)
+pipe(token, Token.isKeyword('const'))
+Arr.filter(tokens, Token.isKeyword('return'))
+```
+
+<ParamField path="keyword" type="string" required>
+  The keyword string to match against `token.value` (e.g., `"const"`, `"return"`, `"async"`).
+</ParamField>
+
+<ParamField path="token" type="Token" required>
+  An oxlint `Token` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `token.type === "Keyword"` and `token.value === keyword`.
+</ResponseField>
+
+---
+
+### `Token.isPunctuator`
+
+Returns `true` if the token is a punctuator with the given value.
+
+```ts
+export const isPunctuator: {
+  (value: string): (token: Token) => boolean;
+  (token: Token, value: string): boolean;
+}
+```
+
+```ts
+// Data-first
+Token.isPunctuator(token, '{')   // true if punctuator "{"
+Token.isPunctuator(token, ';')   // true if punctuator ";"
+
+// Data-last (pipe-friendly)
+pipe(token, Token.isPunctuator('=>'))
+Arr.filter(tokens, Token.isPunctuator(','))
+```
+
+<ParamField path="value" type="string" required>
+  The punctuator string to match against `token.value` (e.g., `"{"`, `";"`, `"=>"`).
+</ParamField>
+
+<ParamField path="token" type="Token" required>
+  An oxlint `Token` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `token.type === "Punctuator"` and `token.value === value`.
+</ResponseField>
+
+---
+
+## Simple predicates
+
+These predicates take only a `Token` and return a `boolean`. They do not support the dual API.
+
+### `Token.isIdentifier`
+
+```ts
+export const isIdentifier = (token: Token): boolean
+```
+
+`true` when `token.type === "Identifier"`.
+
+---
+
+### `Token.isString`
+
+```ts
+export const isString = (token: Token): boolean
+```
+
+`true` when `token.type === "String"`.
+
+---
+
+### `Token.isNumeric`
+
+```ts
+export const isNumeric = (token: Token): boolean
+```
+
+`true` when `token.type === "Numeric"`.
+
+---
+
+### `Token.isBoolean`
+
+```ts
+export const isBoolean = (token: Token): boolean
+```
+
+`true` when `token.type === "Boolean"`.
+
+---
+
+### `Token.isNull`
+
+```ts
+export const isNull = (token: Token): boolean
+```
+
+`true` when `token.type === "Null"`.
+
+---
+
+### `Token.isTemplate`
+
+```ts
+export const isTemplate = (token: Token): boolean
+```
+
+`true` when `token.type === "Template"`. Matches template literal parts (`` ` ``, `${`, `}`).
+
+---
+
+### `Token.isRegularExpression`
+
+```ts
+export const isRegularExpression = (token: Token): boolean
+```
+
+`true` when `token.type === "RegularExpression"`.
+
+---
+
+### `Token.isPrivateIdentifier`
+
+```ts
+export const isPrivateIdentifier = (token: Token): boolean
+```
+
+`true` when `token.type === "PrivateIdentifier"`. Matches class private fields such as `#foo`.
+
+---
+
+## Accessors
+
+### `Token.value`
+
+Returns the string value of a token.
+
+```ts
+export const value = (token: Token): string
+```
+
+<ParamField path="token" type="Token" required>
+  An oxlint `Token` node.
+</ParamField>
+
+<ResponseField name="string" type="string">
+  The raw `token.value` string (e.g., `"const"`, `"{"`, `"hello"`).
+</ResponseField>
+
+---
+
+### `Token.type`
+
+Returns the type discriminant of a token.
+
+```ts
+export const type = (token: Token): string
+```
+
+<ParamField path="token" type="Token" required>
+  An oxlint `Token` node.
+</ParamField>
+
+<ResponseField name="string" type="string">
+  One of `"Keyword"`, `"Identifier"`, `"Punctuator"`, `"String"`, `"Numeric"`, `"Boolean"`, `"Null"`, `"Template"`, `"RegularExpression"`, or `"PrivateIdentifier"`.
+</ResponseField>
+
+---
+
+## Usage example
+
+The following rule checks that every `const` declaration is immediately followed by a semicolon, using `SourceCode.getTokens` to walk the tokens of a node:
+
+```ts
+import { Token, Rule, RuleContext, Diagnostic, SourceCode } from 'effect-oxlint'
+import * as Arr from 'effect/Array'
+import * as Effect from 'effect/Effect'
+
+const requireSemiAfterConst = Rule.define({
+  name: 'require-semi-after-const',
+  meta: Rule.meta({ type: 'layout', description: 'Require semicolon after const' }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      VariableDeclaration: (node) =>
+        Effect.gen(function* () {
+          const tokens = yield* SourceCode.getTokens(node)
+          const hasConst = Arr.some(tokens, Token.isKeyword('const'))
+          const hasSemi = Arr.some(tokens, Token.isPunctuator(';'))
+          if (hasConst && !hasSemi) {
+            yield* ctx.report(
+              Diagnostic.make({ node, message: 'Missing semicolon after const declaration' })
+            )
+          }
+        })
+    };
+  }
+})
+```
+
+<Note>
+  `Token.isKeyword` and `Token.isPunctuator` both use the `dual` combinator from `effect/Function`. When called with one argument they return a curried predicate, making them directly usable as `Arr.filter` callbacks.
+</Note>

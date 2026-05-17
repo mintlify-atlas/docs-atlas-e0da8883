@@ -1,0 +1,265 @@
+---
+title: "Safe AST pattern matching with Option in effect-oxlint"
+description: "Use Option-returning matchers and the dual API to match member expressions, call expressions, imports, and walk ancestor chains without nullable values."
+---
+
+Every matcher in the `AST` module returns `Option` rather than a nullable value or a thrown exception. This keeps matching composable: you chain matchers with `Option.map`, `Option.flatMap`, and `Option.match`, and the absence of a match is just `Option.none()` — no special-casing required. All public matchers support a **dual API**: pass the node as the first argument (data-first) or omit it to get a curried data-last function for use in `pipe`.
+
+## The dual API
+
+The dual API is implemented via `dual` from `effect/Function`. Both call shapes compile to the same underlying implementation:
+
+```ts
+import { pipe } from 'effect';
+import * as Option from 'effect/Option';
+import type { ESTree } from 'effect-oxlint';
+import { AST } from 'effect-oxlint';
+
+declare const memberNode: ESTree.MemberExpression;
+
+// Data-first — pass the node as the first argument
+AST.matchMember(memberNode, 'JSON', ['parse', 'stringify']);
+
+// Data-last — omit the node, get back a function
+pipe(memberNode, AST.matchMember('Effect', 'gen'));
+```
+
+Use data-first when you have the node directly; use data-last when composing matchers inside a `pipe` or `Option.flatMap` chain.
+
+## matchMember — match obj.prop member expressions
+
+`matchMember(node, obj, prop)` matches a `MemberExpression` of the form `obj.prop` where `obj` is an identifier with the given name and `prop` matches one of the given property names. Returns `Option<ESTree.StaticMemberExpression>`.
+
+```ts
+// Match JSON.parse or JSON.stringify
+AST.matchMember(memberNode, 'JSON', ['parse', 'stringify']);
+
+// Match Effect.gen (single property as string)
+AST.matchMember(memberNode, 'Effect', 'gen');
+
+// Data-last, pipe-friendly
+pipe(memberNode, AST.matchMember('Console', 'log'));
+```
+
+`prop` accepts either a single `string` or a `ReadonlyArray<string>`. Computed member expressions (e.g. `obj[prop]`) and private identifiers always return `Option.none()`.
+
+## isMember — boolean predicate shorthand
+
+`isMember(node, obj, prop)` is the boolean version of `matchMember`. Use it when you need a predicate rather than the narrowed node — for example, in `Visitor.tracked`.
+
+```ts
+// Boolean check — true if the node is JSON.parse or JSON.stringify
+AST.isMember(memberNode, 'JSON', ['parse', 'stringify']);
+
+// Data-last — suitable for Arr.filter or Option.filter
+pipe(memberNode, AST.isMember('Effect', 'gen'));
+```
+
+## matchCallOf — match obj.prop(...) call expressions
+
+`matchCallOf(node, obj, prop)` matches a `CallExpression` whose callee is the static member expression `obj.prop`. Returns `Option<ESTree.CallExpression>`.
+
+```ts
+// Match Effect.gen(...)
+AST.matchCallOf(callNode, 'Effect', 'gen');
+
+// Match Effect.fn(...) or Effect.fnUntraced(...)
+AST.matchCallOf(callNode, 'Effect', ['fn', 'fnUntraced']);
+
+// Data-last — chain with Option.flatMap
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+);
+```
+
+## isCallOf — boolean predicate
+
+`isCallOf(node, obj, prop)` is the boolean counterpart to `matchCallOf`. Useful in predicates passed to `Visitor.tracked`.
+
+```ts
+AST.isCallOf(callNode, 'Effect', 'gen'); // true | false
+```
+
+## matchImport — match imports by string or predicate
+
+`matchImport(node, source)` matches an `ImportDeclaration` whose source string satisfies the given matcher. Pass a string for exact match, or a function for custom logic.
+
+```ts
+// Exact match
+AST.matchImport(importNode, 'node:fs');
+
+// Predicate — match any node: built-in
+AST.matchImport(importNode, (src) => src.startsWith('node:'));
+
+// Data-last
+pipe(importNode, AST.matchImport('effect'));
+```
+
+## isImport — boolean predicate
+
+```ts
+AST.isImport(importNode, 'effect'); // true | false
+AST.isImport(importNode, (src) => src.startsWith('node:')); // true | false
+```
+
+## calleeName — extract bare identifier callee
+
+`calleeName(node)` extracts the name of a bare identifier callee from a `CallExpression`. Returns `Option.none()` when the callee is not a plain identifier (e.g. it is a member expression or complex expression).
+
+```ts
+// fetch(...) → Some('fetch')
+AST.calleeName(callNode);
+
+// Effect.gen(...) → None (callee is a member expression)
+AST.calleeName(effectGenCall);
+```
+
+## calleeIdentifier — unified for CallExpression and NewExpression
+
+`calleeIdentifier(node)` works identically to `calleeName` but accepts either a `CallExpression` or a `NewExpression`. Use this when you need to extract the constructor name from `new Date()` or `new Error()`.
+
+```ts
+// new Date() → Some('Date')
+AST.calleeIdentifier(newExprNode);
+
+// fetch(...) → Some('fetch')
+AST.calleeIdentifier(callExprNode);
+```
+
+## memberNames — extract [obj, prop] pair
+
+`memberNames(node)` extracts the object and property identifier names from a static `MemberExpression`. Returns `Option<readonly [obj: string, prop: string]>`. Returns `Option.none()` for computed members.
+
+```ts
+// Effect.gen → Some(['Effect', 'gen'])
+AST.memberNames(memberNode);
+
+// obj[computed] → None
+AST.memberNames(computedNode);
+```
+
+## importSource — extract source string
+
+`importSource(node)` extracts the raw source string from an `ImportDeclaration`. Unlike `matchImport`, this is not a matcher — it always returns a `string`.
+
+```ts
+// import { foo } from 'effect' → 'effect'
+AST.importSource(importNode);
+```
+
+## objectKeys, objectHasKey, objectGetValue
+
+These helpers operate on `ObjectExpression` nodes — useful for inspecting object literals passed as rule options or configuration objects.
+
+```ts
+// Returns ReadonlyArray<string> of statically-known key names
+// (ignores computed keys and spread elements)
+AST.objectKeys(objNode); // e.g. ['type', 'description']
+
+// Boolean check — does the object have this key?
+AST.objectHasKey(objNode, 'fixable');        // data-first
+pipe(objNode, AST.objectHasKey('fixable'));   // data-last
+
+// Get the value expression for a key — Option<ESTree.Expression>
+AST.objectGetValue(objNode, 'type');          // data-first
+pipe(objNode, AST.objectGetValue('type'));    // data-last
+```
+
+## narrow — safe node narrowing to Option
+
+`narrow(node, type)` checks whether an `ESTree.Node`'s `type` field matches the given string literal, and if so returns `Option.some(node)` narrowed to `ESTree.Node & { type: T }`. This is the safe, cast-free alternative to `as`.
+
+```ts
+// Option<ESTree.Node & { type: 'CallExpression' }>
+AST.narrow(node, 'CallExpression');
+
+// Data-last — use in Option chains
+pipe(node, AST.narrow('ImportDeclaration'));
+```
+
+Combine `narrow` with matchers for a fully type-safe chain:
+
+```ts
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+);
+```
+
+## memberPath — full chain a.b.c → ['a', 'b', 'c']
+
+`memberPath(node)` walks a (possibly chained) `MemberExpression` and collects every identifier name into a `NonEmptyReadonlyArray<string>`. Returns `Option.none()` if any segment is computed or non-identifier.
+
+```ts
+// Effect.gen → Some(['Effect', 'gen'])
+AST.memberPath(memberNode);
+
+// a.b.c.d → Some(['a', 'b', 'c', 'd'])
+AST.memberPath(deepMemberNode);
+
+// a[b].c → None (computed segment)
+AST.memberPath(computedNode);
+```
+
+## findAncestor and hasAncestor — parent chain walking
+
+`findAncestor(node, type)` walks the `.parent` chain starting from the immediate parent and returns the first ancestor whose `type` field matches the given string. The return type narrows `type` to the provided literal.
+
+`hasAncestor(node, type)` is the boolean shorthand.
+
+Both functions support the dual API.
+
+```ts
+// Walk parent chain looking for a FunctionDeclaration ancestor
+const fn = AST.findAncestor(node, 'FunctionDeclaration');
+// Option<{ readonly type: 'FunctionDeclaration'; readonly parent?: unknown }>
+
+// Boolean check
+AST.hasAncestor(node, 'TryStatement'); // true | false
+
+// Data-last forms
+pipe(node, AST.findAncestor('ArrowFunctionExpression'));
+pipe(node, AST.hasAncestor('TryStatement'));
+```
+
+<Note>
+`findAncestor` depends on `.parent` links being set on AST nodes. oxlint sets these before calling visitor handlers, so they are always available in real rule handlers. In tests, use `Testing.withParentChain(...)` or `Testing.astNode(type, parent)` to construct nodes with parent pointers.
+</Note>
+
+## Pipe chaining example
+
+The dual API and `Option` composition shine when you need to combine multiple matching steps. This pattern narrows a raw `ESTree.Node` to a `CallExpression`, then confirms the callee is `Effect.gen`:
+
+```ts
+import { pipe } from 'effect';
+import * as Option from 'effect/Option';
+import { AST } from 'effect-oxlint';
+
+// node: ESTree.Node (from a generic visitor handler)
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+);
+// Result: Option<ESTree.CallExpression>
+// — Some when the node is Effect.gen(...)
+// — None for anything else
+```
+
+This composes cleanly into `Option.match` for the report/skip branching:
+
+```ts
+import * as Option from 'effect/Option';
+import * as Effect from 'effect/Effect';
+import { AST, Diagnostic } from 'effect-oxlint';
+
+MemberExpression: (node) =>
+  Option.match(
+    AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+    {
+      onNone: () => Effect.void,
+      onSome: (matched) =>
+        ctx.report(Diagnostic.make({ node: matched, message: 'Use Schema for JSON' }))
+    }
+  )
+```

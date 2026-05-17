@@ -1,0 +1,61 @@
+---
+title: "effect-oxlint: Effect-first oxlint lint rules"
+description: "effect-oxlint wraps @oxlint/plugins in Effect v4 idioms so teams can write custom lint rules with typed AST matchers, composable visitors, and Ref-based state."
+---
+
+effect-oxlint is an Effect v4 wrapper around `@oxlint/plugins` for writing custom oxlint lint rules. Instead of mutable counters and nullable returns, you get `Option`-returning AST matchers, `Ref`-based state, and composable visitor combinators — all bridged to oxlint's synchronous plugin API via `Effect.runSync`. It is designed for Effect teams who want to enforce Effect-specific conventions at lint time.
+
+## What effect-oxlint gives you
+
+Writing oxlint plugins with the raw `@oxlint/plugins` API means managing mutable variables, handling `null` returns, and manually wiring up context. effect-oxlint replaces all of that with Effect idioms:
+
+- **Typed AST matchers** — every matcher in `AST.*` returns `Option` so you can chain with `Option.map`, `Option.flatMap`, and `pipe` without null checks
+- **Composable visitors** — `Visitor.merge`, `Visitor.tracked`, `Visitor.accumulate`, and `Visitor.filter` let you build complex traversal logic from small, tested pieces
+- **`Ref`-based state** — replace `let depth = 0` counters with `yield* Ref.make(0)` inside the `create` generator; state persists across handler calls via closure
+- **No mutable variables** — `create` is an Effect generator; use `yield*` for state, context, and diagnostics
+- **Dual API pattern** — all public combinators in `AST.*` support both data-first (`AST.matchMember(node, 'JSON', 'parse')`) and data-last (`pipe(node, AST.matchMember('JSON', 'parse'))`) forms
+
+## Who it is for
+
+effect-oxlint is for TypeScript teams already using Effect v4 who want to write custom oxlint rules in the same style as their application code. If your codebase forbids `throw`, prefers `Clock` over `new Date()`, or requires imports from `effect/Array` rather than `Array.prototype`, effect-oxlint lets you enforce those conventions as first-class lint rules.
+
+## Modules
+
+effect-oxlint ships 10 public modules plus a dedicated testing subpath export:
+
+| Module | Purpose |
+|---|---|
+| `Rule` | Core rule builder: `define`, `meta`, `banMember`, `banImport`, `banStatement`, `banCallOf`, `banCallOfMember`, `banNewExpr`, `banMultiple` |
+| `Visitor` | Composable visitors: `on`, `onExit`, `merge`, `tracked`, `filter`, `accumulate` |
+| `AST` | `Option`-returning matchers: `matchMember`, `matchCallOf`, `matchImport`, `narrow`, `memberPath`, `findAncestor` |
+| `Diagnostic` | Diagnostic construction and autofix helpers |
+| `RuleContext` | Effect service with access to file info, source code, and `report` |
+| `SourceCode` | Effectful queries: text, tokens, comments, scope, node location |
+| `Scope` | Variable lookup and reference analysis with `Option` |
+| `Plugin` | `define` and `merge` for assembling rules into oxlint plugins |
+| `Comment` | Comment type predicates: `isLine`, `isBlock`, `isJSDoc`, `isDisableDirective` |
+| `Token` | Token type predicates: `isKeyword`, `isPunctuator`, `isIdentifier`, `isString` |
+| `Testing` | Mock builders, `runRule`, `expectDiagnostics`, `messages` — import from `effect-oxlint/testing` |
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Define your first rule, use convenience factories, and run your first test.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install via npm, Bun, or Deno (JSR) and configure your runtime.
+  </Card>
+  <Card title="Writing rules" icon="pen-to-square" href="/guides/writing-rules">
+    Learn how to use Rule.define, generators, and Effect patterns in rules.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/rule">
+    Explore every export across all 10 public modules.
+  </Card>
+</CardGroup>
+
+## How the package ships
+
+effect-oxlint is distributed as **TypeScript source** with no compiled `dist/`. This keeps source maps, JSDoc, and type information perfectly aligned with the code you import — and it is how JSR prefers packages to ship. Consumers must use a TypeScript-aware runtime or bundler. See [Installation](/installation) for details on Bun, Deno, Node.js, and bundler setups.
+
+<Note>
+  effect-oxlint re-exports all `@oxlint/plugins` types (`ESTree`, `OxlintPlugin`, `CreateRule`, and more) so consumers do not need a direct `@oxlint/plugins` dependency for type imports.
+</Note>

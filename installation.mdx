@@ -1,0 +1,110 @@
+---
+title: "Install and configure effect-oxlint"
+description: "Install effect-oxlint via npm, Bun, or Deno (JSR), configure your runtime and TypeScript settings, and understand the package's subpath exports."
+---
+
+effect-oxlint is available on npm and JSR. Because it ships as TypeScript source with no compiled `dist/`, the setup steps vary slightly depending on your runtime. This page covers every supported environment.
+
+## Install
+
+<CodeGroup>
+
+```bash npm
+npm install effect-oxlint effect@4.0.0-beta.57
+```
+
+```bash bun
+bun add effect-oxlint effect@4.0.0-beta.57
+```
+
+```bash deno
+deno add jsr:@effect-oxlint/effect-oxlint
+```
+
+</CodeGroup>
+
+<Note>
+  `effect` is a peer dependency and must be installed at a matching version alongside effect-oxlint. The current supported version is `effect@4.0.0-beta.57`.
+</Note>
+
+## TypeScript source distribution
+
+effect-oxlint is distributed as **TypeScript source** — there is no compiled `dist/` directory. This keeps source maps, JSDoc, and type information perfectly aligned with the code you import, and it is how JSR prefers packages to ship.
+
+The trade-off is that you need a TypeScript-aware runtime or bundler to consume the package. The `exports` field in `package.json` maps directly to `.ts` files:
+
+```json package.json (effect-oxlint internals)
+"exports": {
+  ".": {
+    "types": "./src/index.ts",
+    "import": "./src/index.ts"
+  },
+  "./testing": {
+    "types": "./src/Testing.ts",
+    "import": "./src/Testing.ts"
+  }
+}
+```
+
+## Runtime support
+
+### Bun
+
+No additional configuration required. Bun handles TypeScript natively and resolves the `.ts` exports entry without any extra flags.
+
+### Deno (via JSR)
+
+No additional configuration required. Install via `deno add jsr:@effect-oxlint/effect-oxlint` and import as normal. Deno resolves TypeScript source from JSR automatically.
+
+### Node.js with a bundler
+
+Works out of the box with any TypeScript-aware bundler: **Vite**, **esbuild**, **webpack**, **Rollup**, and **tsup** all resolve `.ts` entry points without additional configuration.
+
+### Node.js directly (without a bundler)
+
+Run your code via `tsx` or `ts-node`, or compile your own project with `tsc` before running with `node`. You must also ensure your `tsconfig.json` is configured correctly:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler"
+  }
+}
+```
+
+`"moduleResolution": "nodenext"` also works. Either setting enables TypeScript to resolve the `.ts` `exports` entry in effect-oxlint's `package.json`.
+
+<Tip>
+  If you see errors like `Cannot find module 'effect-oxlint'` or `Could not resolve './src/index.ts'`, check that your `tsconfig.json` uses `"moduleResolution": "bundler"` or `"nodenext"`.
+</Tip>
+
+## Subpath exports
+
+effect-oxlint exposes two subpath exports:
+
+| Import path | Contents |
+|---|---|
+| `effect-oxlint` | All public modules: `Rule`, `Visitor`, `AST`, `Diagnostic`, `RuleContext`, `SourceCode`, `Scope`, `Plugin`, `Comment`, `Token`, plus all re-exported `@oxlint/plugins` types |
+| `effect-oxlint/testing` | The `Testing` module: mock AST builders, `runRule`, `expectDiagnostics`, `messages`, `expectNoDiagnostics` |
+
+```typescript main import
+import { Rule, AST, Diagnostic, Plugin, RuleContext } from 'effect-oxlint';
+```
+
+```typescript testing import
+import * as Testing from 'effect-oxlint/testing';
+```
+
+<Warning>
+  Only import from `effect-oxlint/testing` in test files. The testing subpath includes mock builders and assertion helpers that are not needed at runtime. Importing it in production code will unnecessarily increase your bundle size.
+</Warning>
+
+## Type-only imports
+
+effect-oxlint re-exports all `@oxlint/plugins` types, so you do not need a direct `@oxlint/plugins` dependency for type imports:
+
+```typescript
+import type { ESTree, OxlintPlugin, CreateRule } from 'effect-oxlint';
+
+const node: ESTree.CallExpression = /* ... */;
+```

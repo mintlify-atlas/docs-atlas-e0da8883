@@ -1,133 +1,105 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "effect-oxlint: Write oxlint rules with Effect v4"
+description: "effect-oxlint wraps @oxlint/plugins in Effect v4 idioms: composable visitors, Option-safe AST matching, and Ref-based state — no mutable variables."
 ---
 
-## Setting up
+effect-oxlint lets you write [oxlint](https://oxc.rs/docs/guide/usage/linter) custom lint rules using [Effect v4](https://effect.website). Instead of mutable counters and nullable returns, you get `Ref`-based state, `Option`-returning AST matchers, and composable visitor combinators — all bridged to oxlint's synchronous plugin API via `Effect.runSync`.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Define your first rule and assemble it into a plugin in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install via npm, Bun, or Deno (JSR) and configure your runtime.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Writing Rules" icon="pen-to-square" href="/guides/writing-rules">
+    Learn how to use Rule.define, convenience factories, and Effect generators.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/rule">
+    Explore every export across all 10 public modules.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can build
 
-Everything you need to create world-class documentation.
+effect-oxlint is designed for teams running Effect who want to enforce Effect-specific conventions at lint time — rules like "no throw inside Effect.gen", "use Clock service instead of new Date()", or "import from effect/Array not Array.prototype".
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Rule.define" icon="layer-group" href="/api/rule">
+    Write fully effectful create generators with yield* for state and context.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Visitor combinators" icon="diagram-project" href="/guides/visitor-combinators">
+    Compose, merge, filter, and accumulate visitors without mutation.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="AST matchers" icon="magnifying-glass" href="/guides/ast-matching">
+    Option-returning matchers with dual API for safe, composable AST queries.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Diagnostics" icon="triangle-exclamation" href="/guides/diagnostics-autofixes">
+    Structured diagnostic builders with composable autofix functions.
   </Card>
-</Columns>
+  <Card title="Testing" icon="flask" href="/guides/testing">
+    50+ AST node builders and assertion helpers for @effect/vitest.
+  </Card>
+  <Card title="Plugin assembly" icon="puzzle-piece" href="/concepts/plugin-assembly">
+    Assemble rules into oxlint-compatible plugins with Plugin.define.
+  </Card>
+</CardGroup>
 
-## Make your content agent ready
+## Get started in 3 steps
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Install the package">
+    Add effect-oxlint and effect to your project:
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+    ```bash
+    npm install effect-oxlint effect@4.0.0-beta.57
+    ```
+  </Step>
+  <Step title="Define a rule">
+    Use `Rule.define` to write an Effect-first lint rule:
 
-## Need inspiration?
+    ```typescript
+    import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+    import * as Effect from 'effect/Effect';
+    import * as Option from 'effect/Option';
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    const noJsonParse = Rule.define({
+      name: 'no-json-parse',
+      meta: Rule.meta({
+        type: 'suggestion',
+        description: 'Use Schema for JSON decoding instead of JSON.parse'
+      }),
+      create: function* () {
+        const ctx = yield* RuleContext;
+        return {
+          MemberExpression: (node) =>
+            Option.match(
+              AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+              {
+                onNone: () => Effect.void,
+                onSome: (matched) =>
+                  ctx.report(Diagnostic.make({ node: matched, message: 'Use Schema for JSON' }))
+              }
+            )
+        };
+      }
+    });
+    ```
+  </Step>
+  <Step title="Assemble a plugin">
+    Export your rules as an oxlint plugin:
+
+    ```typescript
+    import { Plugin } from 'effect-oxlint';
+
+    export default Plugin.define({
+      name: 'my-effect-rules',
+      rules: { 'no-json-parse': noJsonParse }
+    });
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  effect-oxlint ships as TypeScript source with no compiled `dist/`. It works out of the box with Bun, Deno (via JSR), and any TypeScript-aware bundler. See [Installation](/installation) for runtime-specific setup.
+</Tip>

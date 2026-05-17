@@ -1,81 +1,230 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get started with effect-oxlint"
+description: "Write your first Effect-first oxlint lint rule, use convenience factories, assemble a plugin, and run tests — all in under ten minutes."
 ---
 
-## Get started in three steps
+This guide walks you through writing a custom oxlint rule with effect-oxlint from scratch. You will define a rule using `Rule.define`, explore the convenience factories for common patterns, assemble your rules into a plugin, and verify them with the built-in testing utilities.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Install effect-oxlint">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Install effect-oxlint and its peer dependency `effect`:
 
-### Step 2: Deploy your changes
+<CodeGroup>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash npm
+npm install effect-oxlint effect@4.0.0-beta.57
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash bun
+bun add effect-oxlint effect@4.0.0-beta.57
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+```bash deno
+deno add jsr:@effect-oxlint/effect-oxlint
+```
 
-### Step 3: Go live
+</CodeGroup>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Tip>
+  effect-oxlint ships as TypeScript source with no compiled `dist/`. It works out of the box with Bun and Deno. For Node.js, use a bundler or `tsx`. See [Installation](/installation) for full runtime details.
+</Tip>
+
+</Step>
+
+<Step title="Define a rule with Rule.define">
+
+`Rule.define` is the primary entry point. Write `create` as an Effect generator: use `yield*` to access `RuleContext`, create `Ref`-based state, and return a visitor map where each handler returns an `Effect<void>`.
+
+The example below bans `JSON.parse` and `JSON.stringify`, directing developers to use `Schema` for JSON decoding instead:
+
+```typescript no-json-parse.ts
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+
+const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Use Schema for JSON decoding instead of JSON.parse'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      // node is typed as ESTree.MemberExpression automatically
+      MemberExpression: (node) =>
+        Option.match(
+          AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+          {
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                Diagnostic.make({
+                  node: matched,
+                  message: 'Use Schema for JSON'
+                })
+              )
+          }
+        )
+    };
+  }
+});
+```
+
+`AST.matchMember` returns `Option<ESTree.MemberExpression>`. When it returns `Some`, the matched node is narrowed and passed directly to `ctx.report`. When it returns `None`, the handler returns `Effect.void` — no diagnostic, no side effects.
+
+</Step>
+
+<Step title="Use convenience factories for common patterns">
+
+For the most common ban patterns, effect-oxlint provides factory functions that generate a full `CreateRule` from a single call. These cover member expressions, imports, statements, bare identifier calls, `new` expressions, method calls, and combinations of multiple patterns.
+
+```typescript rules.ts
+import { Rule } from 'effect-oxlint';
+
+// Ban a member expression: Math.random
+const noMathRandom = Rule.banMember('Math', 'random', {
+  message: 'Use the Effect Random service instead'
+});
+
+// Ban an import by source path
+const noNodeFs = Rule.banImport('node:fs', {
+  message: 'Use the Effect FileSystem service instead'
+});
+
+// Ban a statement type: ThrowStatement
+const noThrow = Rule.banStatement('ThrowStatement', {
+  message: 'Use Effect.fail instead of throw'
+});
+
+// Ban bare identifier calls: fetch()
+const noFetch = Rule.banCallOf('fetch', {
+  message: 'Use Effect HTTP client instead'
+});
+
+// Ban new expressions: new Date()
+const noNewDate = Rule.banNewExpr('Date', {
+  message: 'Use Clock service instead'
+});
+
+// Ban obj.prop(...) method calls: Effect.runSync, Effect.runPromise
+const noRunSync = Rule.banCallOfMember('Effect', ['runSync', 'runPromise'], {
+  message: 'Keep effects composable — run only at the entry point'
+});
+
+// Ban multiple statement types under one rule
+const noImperativeLoops = Rule.banMultiple(
+  {
+    statements: [
+      'ForStatement',
+      'ForInStatement',
+      'ForOfStatement',
+      'WhileStatement',
+      'DoWhileStatement'
+    ]
+  },
+  { message: 'Use Arr.map / Effect.forEach instead' }
+);
+
+// Combine different ban types in a single rule
+const useClockService = Rule.banMultiple(
+  {
+    newExprs: 'Date',
+    members: [['Date', 'now']]
+  },
+  { message: 'Use Clock service' }
+);
+```
+
+</Step>
+
+<Step title="Assemble rules into a plugin">
+
+Use `Plugin.define` to assemble your rules into an oxlint-compatible plugin. The object maps rule names (as they will appear in oxlint config) to `CreateRule` instances.
+
+```typescript plugin.ts
+import { Plugin } from 'effect-oxlint';
+
+export default Plugin.define({
+  name: 'my-effect-rules',
+  rules: {
+    'no-json-parse': noJsonParse,
+    'no-math-random': noMathRandom,
+    'no-node-fs': noNodeFs,
+    'no-throw': noThrow
+  }
+});
+```
+
+</Step>
+
+<Step title="Write tests with Testing">
+
+effect-oxlint ships a `Testing` module as a dedicated subpath export. It provides mock AST node builders, a synchronous rule runner, and assertion helpers for `@effect/vitest`.
+
+```typescript no-json-parse.test.ts
+import { describe, expect, test } from '@effect/vitest';
+import * as Option from 'effect/Option';
+import * as Testing from 'effect-oxlint/testing';
+
+describe('no-json-parse', () => {
+  test('reports JSON.parse', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('JSON', 'parse')
+    );
+    Testing.expectDiagnostics(result, [{ message: 'Use Schema for JSON' }]);
+  });
+
+  test('reports JSON.stringify', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('JSON', 'stringify')
+    );
+    // messages() returns Option per diagnostic — useful with expect()
+    expect(Testing.messages(result)).toEqual([
+      Option.some('Use Schema for JSON')
+    ]);
+  });
+
+  test('ignores other member expressions', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('console', 'log')
+    );
+    Testing.expectNoDiagnostics(result);
+  });
+});
+```
+
+`Testing.runRule` takes a rule, a visitor key, and a mock AST node. The available node builders include `id`, `memberExpr`, `computedMemberExpr`, `chainedMemberExpr`, `callExpr`, `callOfMember`, `importDecl`, `newExpr`, `throwStmt`, `tryStmt`, `ifStmt`, `program`, `objectExpr`, and more.
+
+<Warning>
+  Import `Testing` from `effect-oxlint/testing`, not from the main `effect-oxlint` export. The testing subpath is intentionally separate so production bundles do not include test-only code.
+</Warning>
+
+</Step>
+
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Visitor combinators" icon="diagram-project" href="/guides/visitor-combinators">
+    Compose, merge, filter, and accumulate visitors for complex traversal logic.
+  </Card>
+  <Card title="AST matching" icon="magnifying-glass" href="/guides/ast-matching">
+    Use Option-returning matchers with the dual API for safe, composable queries.
+  </Card>
+  <Card title="Diagnostics and autofixes" icon="triangle-exclamation" href="/guides/diagnostics-autofixes">
+    Build structured diagnostics with composable autofix functions.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Runtime support details for Bun, Deno, and Node.js.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,139 @@
+---
+title: "RuleContext service API reference"
+description: "RuleContext is an Effect Context.Service exposing oxlint's linting context — filename, sourceCode, options, and report — inside rule handlers."
+---
+
+`RuleContext` is the Effect service that bridges oxlint's raw rule context into your effectful rule handlers. Yielding it inside a `create` generator or a visitor handler gives you typed access to the current file path, rule options, source code object, and the `report` method for emitting diagnostics — all without mutable variables or null checks.
+
+## Accessing the service
+
+Resolve `RuleContext` anywhere inside a `Rule.define` generator or visitor handler with `yield*`:
+
+```typescript
+import { RuleContext } from 'effect-oxlint';
+
+const ctx = yield* RuleContext;
+```
+
+The resolved value is the full service object. All fields are `readonly`.
+
+## Service fields
+
+<ResponseField name="id" type="string" required>
+  Rule identifier in `plugin/rule` form (e.g. `"my-plugin/no-json-parse"`).
+</ResponseField>
+
+<ResponseField name="filename" type="string" required>
+  Absolute path of the file currently being linted.
+</ResponseField>
+
+<ResponseField name="cwd" type="string" required>
+  Current working directory of the linting process.
+</ResponseField>
+
+<ResponseField name="options" type="Readonly<Options>" required>
+  Raw rule options parsed from the oxlint configuration. `Options` is the JSON value array passed after the severity level in rule config.
+</ResponseField>
+
+<ResponseField name="sourceCode" type="SourceCode" required>
+  The oxlint `SourceCode` object for the current file. Provides low-level access to tokens, comments, the AST, and scope data. Prefer the effectful wrappers in the `SourceCode` module over accessing this directly.
+</ResponseField>
+
+<ResponseField name="languageOptions" type="Readonly<LanguageOptions>" required>
+  Parser and language options in effect for this file — includes `ecmaVersion`, `sourceType`, globals, and parser settings.
+</ResponseField>
+
+<ResponseField name="settings" type="Readonly<Settings>" required>
+  Shared settings object from the top-level oxlint configuration. Use this to pass cross-rule configuration like framework names or known globals.
+</ResponseField>
+
+## Reporting diagnostics
+
+The primary method for emitting a lint finding is `ctx.report`. It accepts an `OxlintDiagnostic` object and returns `Effect<void>`:
+
+```typescript
+readonly report: (diagnostic: OxlintDiagnostic) => Effect.Effect<void>
+```
+
+In practice you'll construct the diagnostic with `Diagnostic.make` and pass it directly:
+
+```typescript
+import { Diagnostic, RuleContext } from 'effect-oxlint';
+
+const ctx = yield* RuleContext;
+yield* ctx.report(Diagnostic.make({ node, message: 'Avoid this pattern' }));
+```
+
+### Inline report in handlers
+
+For visitor handlers that only need to report, you can return `ctx.report(...)` directly without an intermediate variable:
+
+```typescript
+import { Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+
+const myRule = Rule.define({
+  name: 'my-rule',
+  meta: Rule.meta({ type: 'suggestion', description: 'Example' }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      ThrowStatement: (node) =>
+        ctx.report(Diagnostic.make({ node, message: 'Use Effect.fail instead' }))
+    };
+  }
+});
+```
+
+## Service key
+
+The service is registered under the key `'effect-oxlint/RuleContext'`. You will rarely need this directly, but it is useful when building test layers or providing the service manually in tests.
+
+## `fromOxlintContext` (internal)
+
+```typescript
+export const fromOxlintContext = (ctx: OxlintContext): RuleContext['Service']
+```
+
+Constructs the `RuleContext` service value from oxlint's raw `Context` object. This is called by the `Rule` module at the FFI boundary when oxlint invokes your rule's `create` function. You do not call this directly.
+
+## Complete example
+
+The following rule uses `RuleContext` to read the filename and report a diagnostic when `JSON.parse` or `JSON.stringify` is accessed:
+
+```typescript
+import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+
+const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Prefer Schema-based decoding over JSON.parse'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+
+    return {
+      MemberExpression: (node) =>
+        Option.match(
+          AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+          {
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                Diagnostic.make({
+                  node: matched,
+                  message: `Detected JSON.parse in ${ctx.filename} — use Schema instead`
+                })
+              )
+          }
+        )
+    };
+  }
+});
+```
+
+<Tip>
+  The `create` generator runs once per file. Resolve `RuleContext` at the top of `create` to access `filename`, `options`, and `settings` before returning your visitor map. You can also `yield* RuleContext` inside individual visitor handlers when needed.
+</Tip>

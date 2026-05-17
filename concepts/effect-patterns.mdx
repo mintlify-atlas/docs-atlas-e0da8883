@@ -1,0 +1,219 @@
+---
+title: "Effect patterns used in effect-oxlint"
+description: "How Effect v4 idioms — generators, Option, Ref, pipe, and Context.Service — are applied when authoring lint rules with effect-oxlint."
+---
+
+`effect-oxlint` is built on Effect v4 idioms throughout. Understanding the handful of patterns the library relies on will make reading and writing rules feel natural. This page walks through each pattern with examples drawn directly from the source.
+
+## Effect.gen with function\*
+
+The `create` field of `Rule.define` is a generator function. Inside it you can `yield*` any Effect to retrieve services, allocate `Ref` state, or run effectful combinators before returning the visitor map.
+
+```ts
+import { Rule, RuleContext } from 'effect-oxlint';
+import * as Ref from 'effect/Ref';
+
+const myRule = Rule.define({
+  name: 'my-rule',
+  meta: Rule.meta({ type: 'suggestion', description: '...' }),
+  create: function* () {
+    // yield* retrieves the RuleContext service
+    const ctx = yield* RuleContext;
+    // yield* allocates a Ref — persists across all handler calls
+    const depthRef = yield* Ref.make(0);
+    return {
+      CallExpression: (node) => { /* ... */ }
+    };
+  }
+});
+```
+
+The `function*` syntax is required — arrow-function generators (`() => {}`) are not valid generator syntax, and `Effect.gen` expects `function*`.
+
+## Option for absence
+
+Every AST matcher in `effect-oxlint` returns `Option<T>` rather than `T | null`. This eliminates null-check branches and makes chains composable.
+
+```ts
+import * as Option from 'effect/Option';
+import { pipe } from 'effect';
+import { AST } from 'effect-oxlint';
+
+// Option.match handles both branches explicitly
+Option.match(AST.matchMember(node, 'JSON', ['parse', 'stringify']), {
+  onNone: () => Effect.void,
+  onSome: (matched) => ctx.report(/* ... */)
+});
+
+// pipe + Option.flatMap chains matchers without intermediate variables
+pipe(
+  AST.narrow(node, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+);
+
+// Option.map transforms values inside Some
+pipe(
+  AST.narrow(node, 'ExportNamedDeclaration'),
+  Option.map((n) => n.declaration)
+);
+```
+
+<Warning>
+Never use `Option.getOrThrow` in rule handlers. Throwing inside an Effect handler propagates as a defect and can crash the linter. Use `Option.match` or `Option.getOrElse` instead.
+</Warning>
+
+## Ref for mutable state
+
+Replace `let depth = 0` counters with `Ref.make` and `Ref.update`. A `Ref` allocated in `create` is closed over by all handler functions, so state persists across the entire file traversal.
+
+```ts
+import * as Ref from 'effect/Ref';
+import { AST, Visitor } from 'effect-oxlint';
+
+create: function* () {
+  const depthRef = yield* Ref.make(0);
+
+  // Visitor.tracked manages increment/decrement automatically
+  const tracker = Visitor.tracked(
+    'CallExpression',
+    (node) => AST.isCallOf(node, 'Effect', 'gen'),
+    depthRef
+  );
+  // depthRef increments on enter, decrements on exit
+
+  return tracker;
+}
+```
+
+You can also read and write manually:
+
+```ts
+import * as Ref from 'effect/Ref';
+
+CallExpression: (node) =>
+  Effect.gen(function* () {
+    const depth = yield* Ref.get(depthRef);
+    if (depth > 0) yield* ctx.report(/* ... */);
+    yield* Ref.update(depthRef, (n) => n + 1);
+  })
+```
+
+## pipe for composition
+
+`pipe` from `effect/Function` threads a value through a sequence of functions left to right. It is the idiomatic way to chain `Option` matchers and build visitor logic without deep nesting.
+
+```ts
+import { pipe } from 'effect';
+import * as Option from 'effect/Option';
+import * as Effect from 'effect/Effect';
+import { AST } from 'effect-oxlint';
+
+MemberExpression: (node) =>
+  pipe(
+    AST.narrow(node, 'MemberExpression'),          // Option<MemberExpression>
+    Option.flatMap(AST.matchMember('JSON', 'parse')), // Option<MemberExpression>
+    Option.match({
+      onNone: () => Effect.void,
+      onSome: (matched) => ctx.report(/* ... */)
+    })
+  )
+```
+
+The data-last overloads on AST functions (e.g. `AST.matchMember('JSON', 'parse')` with no node argument) return a curried function that `pipe` can pass the node through. See [Dual API](#dual-api-pattern) below.
+
+## Effect.runSync at boundaries
+
+`Effect.runSync` is the bridge between oxlint's synchronous plugin API and the Effect world. In `Rule.define`, it is called in two places:
+
+1. **Once per file** — to run the `create` generator, allocate `Ref` state, and build the visitor map.
+2. **Once per node** — inside each visitor handler, to execute the Effect returned by the handler.
+
+As a rule author you never call `Effect.runSync` yourself. It is an internal detail of `Rule.define`. The consequence, however, is important: because `Effect.runSync` cannot surface typed failures, both `create` and every handler must have error channel `never`. See [Handler error channel and fallible effects](/concepts/error-channel) for how to handle fallible sub-effects.
+
+## Context.Service for RuleContext
+
+`RuleContext` is defined as a `Context.Service`. Inside any `create` generator or visitor handler, `yield* RuleContext` retrieves the current lint context — the file name, source code, and `report` function.
+
+```ts
+import { RuleContext } from 'effect-oxlint';
+
+create: function* () {
+  const ctx = yield* RuleContext;
+  // ctx.filename — absolute path of the file being linted
+  // ctx.sourceCode — SourceCode object (tokens, comments, AST)
+  // ctx.report(diagnostic) — queue a lint diagnostic
+  return { /* visitor */ };
+}
+```
+
+The service is provided by `Rule.define` before `Effect.runSync` is called, so it is always available inside `create` and handlers without any extra setup.
+
+## Dual API pattern
+
+Public combinators in `AST` and `Visitor` expose two calling styles through Effect's `dual` function:
+
+- **Data-first** — pass the subject node as the first argument (useful for one-off calls)
+- **Data-last** — omit the node argument and receive a curried function (useful inside `pipe`)
+
+```ts
+import { pipe } from 'effect';
+import { AST } from 'effect-oxlint';
+import type { ESTree } from 'effect-oxlint';
+
+declare const memberNode: ESTree.MemberExpression;
+declare const anyNode: ESTree.Node;
+
+// Data-first: node is argument 1
+AST.matchMember(memberNode, 'JSON', 'parse');
+
+// Data-last: returns (node) => Option<...>
+pipe(memberNode, AST.matchMember('JSON', 'parse'));
+
+// Useful inside flatMap chains
+pipe(
+  AST.narrow(anyNode, 'CallExpression'),
+  Option.flatMap(AST.matchCallOf('Effect', 'gen'))
+);
+```
+
+The `dual` helper in `effect/Function` inspects the argument count at runtime and routes to the correct overload, so both forms share a single implementation.
+
+## Effect.void for no-ops
+
+When an `onNone` branch (or any branch) has nothing to do, return `Effect.void` rather than `Effect.succeed(undefined)`. This is the idiomatic no-op in Effect v4 and signals clearly that the result is intentionally discarded.
+
+```ts
+Option.match(someOption, {
+  onNone: () => Effect.void,   // correct
+  onSome: (value) => ctx.report(/* ... */)
+})
+```
+
+## Module import aliases
+
+The canonical import aliases used throughout `effect-oxlint` are:
+
+```ts
+import * as Arr from 'effect/Array';
+import * as Option from 'effect/Option';
+import * as R from 'effect/Record';
+import * as Str from 'effect/String';
+import * as P from 'effect/Predicate';
+```
+
+<AccordionGroup>
+  <Accordion title="Why aliases instead of Array.prototype methods?">
+    `Arr.map`, `Arr.filter`, and `Arr.reduce` are pure functions that operate on `ReadonlyArray` values. They compose cleanly inside `pipe` chains and align with the rest of the Effect ecosystem. Native `Array.prototype` methods require a method receiver, cannot be used as curried arguments to `pipe`, and may mutate in-place.
+
+    The same reasoning applies to `R.*` over `Object.*`, `Str.*` over `String.prototype.*`, and `P.isString` over raw `typeof` checks.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Handler error channel" icon="triangle-exclamation" href="/concepts/error-channel">
+    Why handlers must have error channel `never` and how to deal with fallible sub-effects.
+  </Card>
+  <Card title="Assembling a plugin" icon="puzzle-piece" href="/concepts/plugin-assembly">
+    How to collect your rules into an oxlint plugin with `Plugin.define` and `Plugin.merge`.
+  </Card>
+</CardGroup>

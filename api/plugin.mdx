@@ -1,0 +1,118 @@
+---
+title: "Plugin module API reference"
+description: "Complete reference for Plugin.define and Plugin.merge — the two functions for creating and composing oxlint plugins from Effect-first rule sets."
+---
+
+The `Plugin` module provides two functions for assembling oxlint plugins: `Plugin.define` wraps a name and a rule map into an `OxlintPlugin` object, and `Plugin.merge` combines multiple plugins into one, letting you split rules across files and compose them at the entry point. Both functions work directly with the `@oxlint/plugins` `CreateRule` type that `Rule.define` produces.
+
+## `Plugin.define`
+
+Creates a typed `OxlintPlugin` from a plugin name and a record of rule creators.
+
+```ts
+export const define = (config: {
+  readonly name: string;
+  readonly rules: Record<string, CreateRule>;
+}): OxlintPlugin
+```
+
+<ParamField path="config.name" type="string" required>
+  The plugin name. This becomes the `meta.name` field on the returned plugin and is used as the namespace prefix in oxlint rule identifiers (e.g., `my-plugin/rule-name`).
+</ParamField>
+
+<ParamField path="config.rules" type="Record<string, CreateRule>" required>
+  A map of rule names to rule creator functions. Each value is a `CreateRule` — the object returned by `Rule.define`.
+</ParamField>
+
+<ResponseField name="OxlintPlugin" type="object">
+  An oxlint plugin object with `meta.name` and a `rules` record. Pass this to oxlint's plugin configuration or to `Plugin.merge`.
+</ResponseField>
+
+### Complete plugin file example
+
+A plugin file typically calls `Plugin.define` and uses `export default` so oxlint's plugin loader can pick it up:
+
+```ts plugin.ts
+import { Plugin, Rule, RuleContext, Diagnostic } from 'effect-oxlint'
+
+const noThrowInGen = Rule.banStatement('ThrowStatement', {
+  message: 'Use Effect.fail instead of throw'
+})
+
+const noMathRandom = Rule.banMember('Math', 'random', {
+  message: 'Use the Effect Random service instead'
+})
+
+export default Plugin.define({
+  name: 'my-effect-rules',
+  rules: {
+    'no-throw-in-gen': noThrowInGen,
+    'no-math-random': noMathRandom,
+  }
+})
+```
+
+<Note>
+  The `export default` pattern is required for oxlint to load the plugin. When you reference this file in your `.oxlintrc.json`, oxlint imports it and reads the default export as the plugin object.
+</Note>
+
+---
+
+## `Plugin.merge`
+
+Combines multiple `OxlintPlugin` objects into a single plugin.
+
+```ts
+export const merge = (
+  ...plugins: ReadonlyArray<OxlintPlugin>
+): OxlintPlugin
+```
+
+<ParamField path="plugins" type="ReadonlyArray<OxlintPlugin>" required>
+  Two or more plugins to merge. If two plugins define a rule with the same name, the later plugin's definition wins.
+</ParamField>
+
+<ResponseField name="OxlintPlugin" type="object">
+  A merged plugin whose `meta.name` is the joined names of all input plugins (e.g., `"plugin-a+plugin-b"`) and whose `rules` record is the union of all input rules.
+</ResponseField>
+
+### Splitting rules across modules
+
+Use `Plugin.merge` to keep related rules in separate files and compose them at the top level:
+
+```ts plugin.ts
+import { Plugin } from 'effect-oxlint'
+import { effectGenRules } from './rules/effect-gen.ts'
+import { importRules } from './rules/imports.ts'
+import { typeRules } from './rules/types.ts'
+
+export default Plugin.merge(
+  Plugin.define({ name: 'effect-gen', rules: effectGenRules }),
+  Plugin.define({ name: 'imports', rules: importRules }),
+  Plugin.define({ name: 'types', rules: typeRules }),
+)
+```
+
+The merged plugin's name becomes `"effect-gen+imports+types"`. Each rule retains the key it was registered under, so rule identifiers in `.oxlintrc.json` do not change.
+
+---
+
+## Types
+
+### `OxlintPlugin`
+
+Re-exported from `@oxlint/plugins` as `Plugin` in `effect-oxlint`. Represents the object shape oxlint's plugin loader expects:
+
+```ts
+type OxlintPlugin = {
+  meta?: { name?: string };
+  rules: Record<string, CreateRule>;
+}
+```
+
+Import the type directly from `effect-oxlint` — you do not need a direct `@oxlint/plugins` dependency:
+
+```ts
+import type { Plugin } from 'effect-oxlint'
+// Plugin is OxlintPlugin
+```

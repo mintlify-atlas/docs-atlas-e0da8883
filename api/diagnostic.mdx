@@ -1,0 +1,310 @@
+---
+title: "Diagnostic module API reference"
+description: "API reference for the Diagnostic module: make, fromId, withFix, withSuggestions, replaceText, insertBefore, insertAfter, removeFix, and composeFixes."
+---
+
+The `Diagnostic` module provides structured builders for creating and enhancing oxlint diagnostics. `make` and `fromId` construct basic diagnostics from a node location and message. `withFix` and `withSuggestions` attach autofix or suggestion metadata. The fix helpers — `replaceText`, `insertBefore`, `insertAfter`, `removeFix`, and `composeFixes` — produce composable `FixFn` values that can be combined freely before attaching to a diagnostic.
+
+## Diagnostic.make
+
+Creates a diagnostic with a message and node location.
+
+```typescript
+export const make = (opts: {
+  readonly node: Ranged;
+  readonly message: string;
+  readonly data?: DiagnosticData;
+}): OxlintDiagnostic
+```
+
+<ParamField path="node" type="Ranged" required>
+  The AST node or token that the diagnostic points to. Any value with range information satisfies `Ranged`.
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  The human-readable diagnostic message shown to the user.
+</ParamField>
+
+<ParamField path="data" type="DiagnosticData">
+  Optional interpolation data for message templates.
+</ParamField>
+
+```typescript
+import { Diagnostic } from 'effect-oxlint';
+
+const diag = Diagnostic.make({
+  node,
+  message: 'Use Schema for JSON decoding instead of JSON.parse'
+});
+```
+
+---
+
+## Diagnostic.fromId
+
+Creates a diagnostic using a `messageId` key from `meta.messages` rather than an inline string. The oxlint runtime resolves the template at report time.
+
+```typescript
+export const fromId = (opts: {
+  readonly node: Ranged;
+  readonly messageId: string;
+  readonly data?: DiagnosticData;
+}): OxlintDiagnostic
+```
+
+<ParamField path="node" type="Ranged" required>
+  The AST node or token that the diagnostic points to.
+</ParamField>
+
+<ParamField path="messageId" type="string" required>
+  A key from the `messages` record in `Rule.meta`. The runtime substitutes it with the corresponding message template.
+</ParamField>
+
+<ParamField path="data" type="DiagnosticData">
+  Optional interpolation data for the message template.
+</ParamField>
+
+```typescript
+const myRule = Rule.define({
+  name: 'no-clock-direct',
+  meta: Rule.meta({
+    type: 'problem',
+    description: 'Disallow direct Date usage',
+    messages: {
+      useClockService: 'Use the Clock service instead of {{expr}}'
+    }
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      NewExpression: (node) =>
+        Option.match(AST.narrow(node, 'NewExpression'), {
+          onNone: () => Effect.void,
+          onSome: (n) =>
+            ctx.report(
+              Diagnostic.fromId({
+                node: n,
+                messageId: 'useClockService',
+                data: { expr: 'new Date()' }
+              })
+            )
+        })
+    };
+  }
+});
+```
+
+---
+
+## Diagnostic.withFix
+
+Attaches an autofix function to a diagnostic. Dual API — supports both data-first and data-last calling conventions.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const withFix: {
+  (fix: FixFn): (diagnostic: OxlintDiagnostic) => OxlintDiagnostic
+}
+```
+
+```typescript Data-first
+export const withFix: {
+  (diagnostic: OxlintDiagnostic, fix: FixFn): OxlintDiagnostic
+}
+```
+
+</CodeGroup>
+
+<ParamField path="diagnostic" type="OxlintDiagnostic" required>
+  The diagnostic to attach the fix to.
+</ParamField>
+
+<ParamField path="fix" type="FixFn" required>
+  A fix function, typically produced by `replaceText`, `insertBefore`, `insertAfter`, `removeFix`, or `composeFixes`.
+</ParamField>
+
+```typescript
+// Data-first
+const fixed = Diagnostic.withFix(
+  Diagnostic.make({ node, message: 'Avoid this pattern' }),
+  Diagnostic.replaceText(node, 'replacement')
+)
+
+// Data-last with pipe
+const fixed = pipe(
+  Diagnostic.make({ node, message: 'Avoid this pattern' }),
+  Diagnostic.withFix(Diagnostic.replaceText(node, 'replacement'))
+)
+```
+
+---
+
+## Diagnostic.withSuggestions
+
+Attaches suggestion fixes to a diagnostic. Suggestions differ from autofixes in that the user applies them manually. Dual API — supports both data-first and data-last calling conventions.
+
+<CodeGroup>
+
+```typescript Data-last (pipe-friendly)
+export const withSuggestions: {
+  (
+    suggestions: ReadonlyArray<Suggestion>
+  ): (diagnostic: OxlintDiagnostic) => OxlintDiagnostic
+}
+```
+
+```typescript Data-first
+export const withSuggestions: {
+  (
+    diagnostic: OxlintDiagnostic,
+    suggestions: ReadonlyArray<Suggestion>
+  ): OxlintDiagnostic
+}
+```
+
+</CodeGroup>
+
+<ParamField path="diagnostic" type="OxlintDiagnostic" required>
+  The diagnostic to attach suggestions to.
+</ParamField>
+
+<ParamField path="suggestions" type="ReadonlyArray<Suggestion>" required>
+  An array of `Suggestion` objects, each containing a description and a fix function.
+</ParamField>
+
+<Note>
+  To enable suggestions, set `hasSuggestions: true` in your `Rule.meta` call.
+</Note>
+
+```typescript
+const diag = pipe(
+  Diagnostic.make({ node, message: 'Prefer Effect.log' }),
+  Diagnostic.withSuggestions([
+    {
+      desc: 'Replace with Effect.log',
+      fix: Diagnostic.replaceText(node, 'Effect.log')
+    }
+  ])
+)
+```
+
+---
+
+## Diagnostic.replaceText
+
+Returns a `FixFn` that replaces the text of a node or token with the given string.
+
+```typescript
+export const replaceText =
+  (nodeOrToken: Ranged, text: string): FixFn
+```
+
+<ParamField path="nodeOrToken" type="Ranged" required>
+  The node or token whose source text should be replaced.
+</ParamField>
+
+<ParamField path="text" type="string" required>
+  The replacement text.
+</ParamField>
+
+```typescript
+Diagnostic.replaceText(node, 'Effect.log')
+```
+
+---
+
+## Diagnostic.insertBefore
+
+Returns a `FixFn` that inserts text immediately before a node or token.
+
+```typescript
+export const insertBefore =
+  (nodeOrToken: Ranged, text: string): FixFn
+```
+
+<ParamField path="nodeOrToken" type="Ranged" required>
+  The node or token to insert text before.
+</ParamField>
+
+<ParamField path="text" type="string" required>
+  The text to insert.
+</ParamField>
+
+```typescript
+Diagnostic.insertBefore(node, 'await ')
+```
+
+---
+
+## Diagnostic.insertAfter
+
+Returns a `FixFn` that inserts text immediately after a node or token.
+
+```typescript
+export const insertAfter =
+  (nodeOrToken: Ranged, text: string): FixFn
+```
+
+<ParamField path="nodeOrToken" type="Ranged" required>
+  The node or token to insert text after.
+</ParamField>
+
+<ParamField path="text" type="string" required>
+  The text to insert.
+</ParamField>
+
+```typescript
+Diagnostic.insertAfter(node, ' as const')
+```
+
+---
+
+## Diagnostic.removeFix
+
+Returns a `FixFn` that removes a node or token from the source.
+
+```typescript
+export const removeFix =
+  (nodeOrToken: Ranged): FixFn
+```
+
+<ParamField path="nodeOrToken" type="Ranged" required>
+  The node or token to remove.
+</ParamField>
+
+```typescript
+Diagnostic.removeFix(node)
+```
+
+---
+
+## Diagnostic.composeFixes
+
+Composes multiple `FixFn` values into a single `FixFn`. All individual fixes are collected into a single array result, letting you apply several edits atomically.
+
+```typescript
+export const composeFixes =
+  (...fixes: ReadonlyArray<FixFn>): FixFn
+```
+
+<ParamField path="fixes" type="ReadonlyArray<FixFn>" required>
+  Any number of fix functions to compose. All are applied when the composed fix runs.
+</ParamField>
+
+```typescript
+// Wrap a node with a function call: prefix + suffix
+const multiFix = Diagnostic.composeFixes(
+  Diagnostic.insertBefore(node, 'Effect.succeed('),
+  Diagnostic.insertAfter(node, ')')
+)
+
+const diag = pipe(
+  Diagnostic.make({ node, message: 'Wrap in Effect.succeed' }),
+  Diagnostic.withFix(multiFix)
+)
+```
+
+<Tip>
+  All fix helpers return plain `FixFn` values. You can store them in variables, pass them as arguments, or compose them before attaching to a diagnostic — they carry no side effects until oxlint applies the fix.
+</Tip>

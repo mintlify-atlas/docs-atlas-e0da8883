@@ -1,0 +1,166 @@
+---
+title: "Composable AST visitors with effect-oxlint combinators"
+description: "Build effectful visitors without mutation using Visitor.on, merge, tracked, filter, and accumulate — Ref-based state replacing mutable depth counters."
+---
+
+Visitors in effect-oxlint are plain `Record<string, (node: ESTree.Node) => Effect<void>>` maps. Instead of writing handlers as standalone callbacks with hidden mutable state, the `Visitor` module gives you composable combinators that wire up `Ref`-based counters, file-conditional gating, and collect-then-analyze patterns — all expressible as pure data transformations.
+
+## What visitors are
+
+An `EffectVisitor` is a record that maps AST node type names (e.g. `'CallExpression'`) and exit variants (e.g. `'CallExpression:exit'`) to effectful handlers:
+
+```ts
+type EffectHandler<N = ESTree.Node> = (
+  node: N
+) => Effect.Effect<void, never, RuleContext>;
+
+type EffectVisitor = {
+  readonly [key: string]: EffectHandler;
+};
+```
+
+Every handler's error channel is fixed to `never`. The runtime boundary in `Rule.define` executes handlers synchronously via `Effect.runSync`, so failures must be caught inside the handler. See the `EffectHandler` JSDoc in `src/Visitor.ts` for the recommended `Effect.catch` pattern.
+
+## Visitor.on — single enter-phase handler
+
+`Visitor.on(nodeType, handler)` creates a one-entry visitor for the enter phase of a node visit. When the `nodeType` string is a known oxlint visitor key, the handler parameter is automatically narrowed to the corresponding ESTree node type.
+
+```ts
+import { Visitor } from 'effect-oxlint';
+import * as Ref from 'effect/Ref';
+
+const visitor = Visitor.on('ThrowStatement', function* (node) {
+  const depth = yield* Ref.get(myDepthRef);
+  if (depth > 0) {
+    yield* ctx.report({ node, message: 'No throw inside Effect.gen' });
+  }
+});
+```
+
+## Visitor.onExit — single exit-phase handler
+
+`Visitor.onExit(nodeType, handler)` is identical to `Visitor.on` but registers the handler under `"NodeType:exit"`, which runs after all child nodes have been visited.
+
+```ts
+const exitVisitor = Visitor.onExit('FunctionDeclaration', (node) =>
+  // runs after the entire function body has been traversed
+  Effect.void
+);
+```
+
+## Visitor.merge — combining multiple visitors
+
+`Visitor.merge(...visitors)` merges an arbitrary number of `EffectVisitor` objects into one. When two visitors handle the same node type, both handlers run sequentially (left to right).
+
+```ts
+import { Visitor } from 'effect-oxlint';
+
+const combined = Visitor.merge(importVisitor, memberVisitor, statementVisitor);
+```
+
+This is how `Rule.banMultiple` combines its per-pattern sub-visitors internally, and how you can compose independently-written rule fragments without coordination.
+
+<Note>
+Handler order within a merged visitor is deterministic: left-to-right in the argument list. Both handlers always run — there is no short-circuit on the first match.
+</Note>
+
+## Visitor.tracked — Ref-based depth counter
+
+`Visitor.tracked(nodeType, predicate, ref)` replaces the common `let depth = 0` mutable counter pattern. It creates a matching enter/exit visitor pair: the `Ref<number>` is incremented on enter when the predicate returns `true`, and decremented on exit.
+
+```ts
+import * as Ref from 'effect/Ref';
+import { AST, Visitor } from 'effect-oxlint';
+
+// Inside create: function* () { ... }
+const depthRef = yield* Ref.make(0);
+
+const tracker = Visitor.tracked(
+  'CallExpression',
+  // node is typed as ESTree.CallExpression
+  (node) => AST.isCallOf(node, 'Effect', 'gen'),
+  depthRef
+);
+// depthRef increments on CallExpression enter, decrements on CallExpression:exit
+// Use Ref.get(depthRef) in other handlers to know if you're inside Effect.gen
+```
+
+The predicate receives the narrowed node type matching the visitor key, so TypeScript knows `node` is `ESTree.CallExpression` inside the `'CallExpression'` tracker. The `ref` value is typically merged with other visitors:
+
+```ts
+return Visitor.merge(
+  tracker,
+  Visitor.on('ThrowStatement', function* (node) {
+    const depth = yield* Ref.get(depthRef);
+    if (depth > 0) {
+      yield* ctx.report(Diagnostic.make({ node, message: '...' }));
+    }
+  })
+);
+```
+
+## Visitor.filter — conditional visitors by filename
+
+`Visitor.filter(predicate, visitor)` evaluates a predicate against the current filename at create time. If the predicate returns `false`, an empty visitor is returned — the handlers are never registered for that file.
+
+`filter` supports the dual API: pass both arguments for data-first, or pass only the predicate to get a data-last function suitable for `pipe`.
+
+```ts
+import { Visitor } from 'effect-oxlint';
+
+// Data-first — restrict mainVisitor to non-test files
+const gatedVisitor = yield* Visitor.filter(
+  (filename) => !filename.endsWith('.test.ts'),
+  mainVisitor
+);
+
+// Data-last — pipe-friendly
+const gatedVisitor2 = yield* pipe(
+  mainVisitor,
+  Visitor.filter((filename) => !filename.includes('__mocks__'))
+);
+```
+
+<Tip>
+`Visitor.filter` returns an `Effect<EffectVisitor, never, RuleContext>` because it reads the filename from the `RuleContext` service. Use `yield*` inside your `create` generator to unwrap it.
+</Tip>
+
+## Visitor.accumulate — collect then analyze
+
+`Visitor.accumulate(nodeType, extract, analyze)` implements the collect-then-analyze pattern: values are gathered during traversal, then passed to an analyzer at `Program:exit`. This is useful for rules that need to see all occurrences before deciding whether to report.
+
+- `extract`: called for each node of `nodeType`; returns `Option<A>`. `Option.none()` is silently skipped.
+- `analyze`: an Effect generator receiving the collected `ReadonlyArray<A>` at `Program:exit`.
+
+```ts
+import { Visitor, AST } from 'effect-oxlint';
+
+const visitor = yield* Visitor.accumulate(
+  'ExportNamedDeclaration',
+  (node) => AST.narrow(node, 'ExportNamedDeclaration'),
+  function* (exports) {
+    // All exports have been collected — analyze them here.
+    // For example: report if no default export was found,
+    // or if export count exceeds a threshold.
+  }
+);
+```
+
+Internally, `accumulate` creates a `Ref<ReadonlyArray<A>>` and wires it into an enter-phase visitor plus a `Program:exit` handler via `Visitor.merge`.
+
+## TypedEffectVisitor vs EffectVisitor
+
+When you return an object literal from `create`, TypeScript treats it as a `TypedEffectVisitor`. Known visitor keys (those present in the oxlint `Visitor` type, such as `'MemberExpression'` or `'CallExpression'`) automatically narrow the handler's `node` parameter to the matching ESTree type:
+
+```ts
+return {
+  // node: ESTree.MemberExpression — no manual cast needed
+  MemberExpression: (node) => Effect.void,
+  // node: ESTree.CallExpression
+  CallExpression: (node) => Effect.void,
+  // node: ESTree.Node — unknown key falls back to base type
+  SomeUnknownKey: (node) => Effect.void,
+};
+```
+
+`EffectVisitor` is the internal representation used by combinators — it accepts `ESTree.Node` for all keys. The variance is safe at runtime because oxlint guarantees each handler receives the node type that matches its key.

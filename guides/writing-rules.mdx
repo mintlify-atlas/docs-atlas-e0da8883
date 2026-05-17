@@ -1,0 +1,295 @@
+---
+title: "Writing Effect-first oxlint rules with Rule.define"
+description: "Define oxlint lint rules using Effect generators, typed visitors, Schema-decoded options, and convenience ban factories like banMember and banMultiple."
+---
+
+effect-oxlint lets you write fully effectful lint rules where each visitor handler is an `Effect<void>` that can read `Ref` state, access context, and report diagnostics — all without a single mutable variable or callback-style setup.
+
+## Rule.define — the primary entry point
+
+`Rule.define` is the core function for creating a custom oxlint rule. It accepts a `RuleConfig` object and returns a standard `CreateRule` that oxlint can load. The `create` field is an Effect generator function (`function*`) that runs once per file and returns a `TypedEffectVisitor` map.
+
+```ts
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+
+const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Use Schema for JSON decoding instead of JSON.parse'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      // node is typed as ESTree.MemberExpression automatically
+      MemberExpression: (node) =>
+        Option.match(
+          AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+          {
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                Diagnostic.make({
+                  node: matched,
+                  message: 'Use Schema for JSON'
+                })
+              )
+          }
+        )
+    };
+  }
+});
+```
+
+The generator may `yield*` any Effect-compatible values: `Ref.make(0)` for state, `RuleContext` for context access, `Visitor.accumulate(...)` for collected analysis. State created in `create` persists across all handler invocations for that file via closure.
+
+<Note>
+Both the `create` generator and every visitor handler have a fixed error channel of `never`. Rules cannot propagate typed failures — any fallible sub-effect must be caught inside the handler and surfaced as a diagnostic or silently suppressed.
+</Note>
+
+## Rule.meta — metadata helper
+
+`Rule.meta` constructs the `RuleMeta` object with sensible defaults. The `type` and `description` fields are required; all others are optional.
+
+```ts
+Rule.meta({
+  type: 'suggestion',          // 'problem' | 'suggestion' | 'layout'
+  description: 'Prefer Effect patterns over imperative code',
+  fixable: 'code',             // 'code' | 'whitespace' | undefined
+  hasSuggestions: true,
+  messages: {
+    noThrow: 'Use Effect.fail instead of throw',
+    noTryCatch: 'Use Effect.try instead of try/catch'
+  },
+  docs: {
+    recommended: true
+  }
+})
+```
+
+The `messages` map is used with `Diagnostic.fromId` to reference diagnostics by `messageId` rather than an inline string — useful when you want to keep message text centralised in metadata.
+
+## Options with Schema decoding
+
+The optional `options` field on `RuleConfig` accepts a `Schema.Decoder`. When provided, the first element of the raw JSON options array passed by the linter configuration is decoded at rule-create time and forwarded as the `options` argument to your `create` generator.
+
+```ts
+import * as Schema from 'effect/Schema';
+import { Rule } from 'effect-oxlint';
+
+const myRule = Rule.define({
+  name: 'prefer-effect-random',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Prefer Effect Random service'
+  }),
+  options: Schema.Struct({
+    allowedGlobals: Schema.Array(Schema.String)
+  }),
+  create: function* (options) {
+    // options is typed as { allowedGlobals: string[] }
+    const allowed = options.allowedGlobals;
+    const ctx = yield* RuleContext;
+    return {
+      CallExpression: (node) => { /* use allowed */ }
+    };
+  }
+});
+```
+
+If decoding fails, `Schema.decodeUnknownSync` throws, which crashes rule creation for that file. Validate liberally and provide good defaults in your Schema when end-user config may be malformed.
+
+## Convenience factories
+
+For the most common patterns, effect-oxlint ships ready-made factories. Each factory calls `Rule.define` internally and auto-derives a rule name from the pattern arguments.
+
+<AccordionGroup>
+
+<Accordion title="Rule.banMember(obj, prop, opts)">
+
+Bans `obj.prop` member expression access. `prop` can be a single string or an array of strings to match multiple properties.
+
+```ts
+import { Rule } from 'effect-oxlint';
+
+// Ban Math.random
+const noMathRandom = Rule.banMember('Math', 'random', {
+  message: 'Use the Effect Random service instead'
+});
+
+// Ban JSON.parse and JSON.stringify
+const noJson = Rule.banMember('JSON', ['parse', 'stringify'], {
+  message: 'Use Schema for JSON encoding/decoding'
+});
+```
+
+</Accordion>
+
+<Accordion title="Rule.banImport(source, opts)">
+
+Bans `import ... from "source"` declarations matching a string or predicate. Pass a function to match by prefix or pattern.
+
+```ts
+// Exact string match
+const noNodeFs = Rule.banImport('node:fs', {
+  message: 'Use the Effect FileSystem service instead'
+});
+
+// Predicate — ban all node: built-ins
+const noNodeBuiltins = Rule.banImport(
+  (src) => src.startsWith('node:'),
+  { message: 'Use Effect services for I/O and system calls' }
+);
+```
+
+</Accordion>
+
+<Accordion title="Rule.banCallOf(name, opts)">
+
+Bans bare identifier call expressions like `fetch()`, `useState()`, or `readFileSync()`. `name` can be a single string or an array.
+
+```ts
+// Ban fetch()
+const noFetch = Rule.banCallOf('fetch', {
+  message: 'Use Effect HTTP client instead'
+});
+
+// Ban multiple React hooks
+const noHooks = Rule.banCallOf(['useState', 'useEffect', 'useRef'], {
+  message: 'Use Effect services for state and side effects'
+});
+```
+
+</Accordion>
+
+<Accordion title="Rule.banCallOfMember(obj, prop, opts)">
+
+Bans `obj.prop(...)` method-call patterns. Unlike `banMember`, this only fires when the member expression is actually called — not when it is merely accessed.
+
+```ts
+// Ban Effect.runSync and Effect.runPromise
+const noRunSync = Rule.banCallOfMember('Effect', ['runSync', 'runPromise'], {
+  message: 'Keep effects composable — run only at the entry point'
+});
+
+// Ban console methods
+const noConsole = Rule.banCallOfMember('console', ['log', 'error', 'warn'], {
+  message: 'Use Effect.log / Effect.logError instead'
+});
+```
+
+</Accordion>
+
+<Accordion title="Rule.banNewExpr(name, opts)">
+
+Bans `new` expressions with a given constructor name. `name` can be a string or array.
+
+```ts
+// Ban new Date()
+const noNewDate = Rule.banNewExpr('Date', {
+  message: 'Use Clock service instead'
+});
+
+// Ban new Error() and new TypeError()
+const noNewError = Rule.banNewExpr(['Error', 'TypeError'], {
+  message: 'Use Schema.TaggedErrorClass for typed errors'
+});
+```
+
+</Accordion>
+
+<Accordion title="Rule.banStatement(nodeType, opts)">
+
+Bans a specific ESTree statement node type by name.
+
+```ts
+// Ban throw statements
+const noThrow = Rule.banStatement('ThrowStatement', {
+  message: 'Use Effect.fail instead of throw'
+});
+```
+
+</Accordion>
+
+<Accordion title="Rule.banMultiple(spec, opts)">
+
+Combines multiple ban patterns — calls, new expressions, member accesses, member calls, imports, and statements — into a single rule with merged visitors. This is the most flexible factory.
+
+The `BanMultipleSpec` fields are all optional:
+
+| Field | Type | Description |
+|---|---|---|
+| `calls` | `string \| string[]` | Bare identifier calls to ban |
+| `newExprs` | `string \| string[]` | `new` expressions to ban |
+| `members` | `[obj, prop][]` | Member expressions to ban |
+| `memberCalls` | `[obj, prop][]` | Member call expressions to ban |
+| `imports` | `(string \| predicate)[]` | Import sources to ban |
+| `statements` | `string[]` | Statement node types to ban |
+
+```ts
+// Ban all imperative loop variants
+const noImperativeLoops = Rule.banMultiple(
+  {
+    statements: [
+      'ForStatement',
+      'ForInStatement',
+      'ForOfStatement',
+      'WhileStatement',
+      'DoWhileStatement'
+    ]
+  },
+  { message: 'Use Arr.map / Effect.forEach instead' }
+);
+
+// Combine new expression + member bans under one rule
+const useClockService = Rule.banMultiple(
+  {
+    newExprs: 'Date',
+    members: [['Date', 'now']]
+  },
+  { message: 'Use Clock service' }
+);
+
+// Full mix: imports + member calls
+const noRawFs = Rule.banMultiple(
+  {
+    imports: ['node:fs'],
+    memberCalls: [['fs', ['readFileSync', 'writeFileSync']]]
+  },
+  { message: 'Use Effect FileSystem service' }
+);
+```
+
+Pass a `name` field in `opts` to override the auto-derived rule name:
+
+```ts
+Rule.banMultiple(spec, { name: 'no-imperative', message: '...' })
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Assembling rules into a plugin
+
+Once your rules are defined, pass them to `Plugin.define` to create a plugin oxlint can load:
+
+```ts
+import { Plugin } from 'effect-oxlint';
+
+export default Plugin.define({
+  name: 'my-effect-rules',
+  rules: {
+    'no-json-parse': noJsonParse,
+    'no-math-random': noMathRandom,
+    'no-node-fs': noNodeFs,
+    'no-throw': noThrow
+  }
+});
+```
+
+<Tip>
+Rule names inside the plugin object are the keys oxlint uses to enable/disable them in `.oxlintrc`. The `name` field in `Rule.define` is used only for tracing spans and auto-derived rule names in the convenience factories.
+</Tip>

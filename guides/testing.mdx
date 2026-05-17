@@ -1,0 +1,332 @@
+---
+title: "Testing oxlint rules with the effect-oxlint Testing module"
+description: "Write isolated unit tests for lint rules using mock AST builders, runRule, expectDiagnostics, and context helpers from effect-oxlint/testing."
+---
+
+effect-oxlint ships a dedicated `Testing` module with everything you need to exercise rules without running the full oxlint binary. It is exposed as a subpath export so test-only code never enters production bundles. Import it with `import * as Testing from 'effect-oxlint/testing'`.
+
+## Subpath import
+
+```ts
+import { describe, expect, test } from '@effect/vitest';
+import * as Option from 'effect/Option';
+import { Rule } from 'effect-oxlint';
+import * as Testing from 'effect-oxlint/testing';
+```
+
+<Note>
+Always import from `'effect-oxlint/testing'`, not `'effect-oxlint'`. The testing subpath is excluded from production builds and carries `@effect/vitest` as a dev-only peer.
+</Note>
+
+## Testing.runRule — run against a single visitor event
+
+`Testing.runRule(rule, visitorKey, node, opts?)` creates a mock oxlint context, runs the rule's `create` generator once, then fires the named visitor handler with the provided node. Returns `ReadonlyArray<ReportedDiagnostic>`.
+
+```ts
+const result = Testing.runRule(
+  noJsonParse,
+  'MemberExpression',
+  Testing.memberExpr('JSON', 'parse')
+);
+```
+
+The optional `opts` parameter is a `MockContextOptions` object for controlling filename, source text, and rule options passed to the rule.
+
+## Testing.runRuleMulti — multiple events with shared state
+
+`Testing.runRuleMulti(rule, pairs, opts?)` fires multiple visitor events against the same context. Crucially, `Ref` state created in `create` is shared across all calls — this is how you test rules that track enter/exit depth or accumulate data across nodes.
+
+```ts
+const result = Testing.runRuleMulti(noThrowInGen, [
+  ['CallExpression',  Testing.callOfMember('Effect', 'gen')],
+  ['ThrowStatement',  Testing.throwStmt()],
+  ['CallExpression:exit', Testing.callOfMember('Effect', 'gen')]
+]);
+```
+
+## Testing.expectDiagnostics — partial matching by message
+
+`Testing.expectDiagnostics(result, expected)` asserts that the result array matches the expected patterns. Each matcher object is partial — only the fields you provide are compared. Missing fields are ignored.
+
+```ts
+Testing.expectDiagnostics(result, [
+  { message: 'Use Schema for JSON' }
+]);
+
+// Match by messageId
+Testing.expectDiagnostics(result, [
+  { messageId: 'noThrow' },
+  { messageId: 'noTryCatch' }
+]);
+```
+
+The assertion throws a descriptive error (including the actual messages received) when the count or content does not match.
+
+## Testing.expectNoDiagnostics — assert clean
+
+`Testing.expectNoDiagnostics(result)` throws when any diagnostic was reported. Use this on the "should not flag" cases.
+
+```ts
+Testing.expectNoDiagnostics(
+  Testing.runRule(noJsonParse, 'MemberExpression', Testing.memberExpr('console', 'log'))
+);
+```
+
+## Testing.messages — ReadonlyArray\<Option\<string\>\>
+
+`Testing.messages(result)` maps each `ReportedDiagnostic` to `Option<string>` — `Option.some(message)` when the diagnostic uses an inline message, `Option.none()` when it uses `messageId`.
+
+```ts
+expect(Testing.messages(result)).toEqual([
+  Option.some('Use Schema for JSON')
+]);
+```
+
+## Testing.messageIds — ReadonlyArray\<Option\<string\>\>
+
+`Testing.messageIds(result)` is the counterpart for `messageId`-based diagnostics.
+
+```ts
+expect(Testing.messageIds(result)).toEqual([
+  Option.some('noThrow')
+]);
+```
+
+## Complete test example
+
+This is the full test suite for the `no-json-parse` rule from the README:
+
+```ts
+import { describe, expect, test } from '@effect/vitest';
+import * as Option from 'effect/Option';
+import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+import * as Testing from 'effect-oxlint/testing';
+import * as Effect from 'effect/Effect';
+
+const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Use Schema for JSON decoding instead of JSON.parse'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      MemberExpression: (node) =>
+        Option.match(
+          AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+          {
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                Diagnostic.make({
+                  node: matched,
+                  message: 'Use Schema for JSON'
+                })
+              )
+          }
+        )
+    };
+  }
+});
+
+describe('no-json-parse', () => {
+  test('reports JSON.parse', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('JSON', 'parse')
+    );
+    Testing.expectDiagnostics(result, [{ message: 'Use Schema for JSON' }]);
+    // Or use the messages() helper — returns Option per diagnostic
+    expect(Testing.messages(result)).toEqual([
+      Option.some('Use Schema for JSON')
+    ]);
+  });
+
+  test('reports JSON.stringify', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('JSON', 'stringify')
+    );
+    Testing.expectDiagnostics(result, [{ message: 'Use Schema for JSON' }]);
+  });
+
+  test('ignores other member expressions', () => {
+    const result = Testing.runRule(
+      noJsonParse,
+      'MemberExpression',
+      Testing.memberExpr('console', 'log')
+    );
+    Testing.expectNoDiagnostics(result);
+  });
+});
+```
+
+## Node builders overview
+
+The `Testing` module provides a comprehensive set of AST node constructors. Each builder produces a minimal mock object satisfying the type shape expected by the rule and visitor machinery.
+
+### Identifiers
+
+```ts
+Testing.id('fetch')
+// { type: 'Identifier', name: 'fetch' }
+```
+
+### Member expressions
+
+```ts
+// obj.prop (non-computed)
+Testing.memberExpr('JSON', 'parse')
+
+// obj[prop] (computed)
+Testing.computedMemberExpr('obj', 'key')
+
+// a.b.c chained member (at least 2 names required)
+Testing.chainedMemberExpr('Effect', 'gen')
+Testing.chainedMemberExpr('a', 'b', 'c', 'd')
+```
+
+### Call expressions
+
+```ts
+// fetch(args)
+Testing.callExpr('fetch', [Testing.strLiteral('/api')])
+
+// Effect.gen(args) — MemberExpression callee
+Testing.callOfMember('Effect', 'gen', [])
+```
+
+### Imports
+
+```ts
+// import ... from 'effect'
+Testing.importDecl('effect')
+
+// import { map, filter } from 'effect/Array'
+Testing.importDeclWithSpecifiers('effect/Array', [
+  Testing.importSpecifier('map'),
+  Testing.importSpecifier('filter')
+])
+```
+
+### Statements
+
+```ts
+Testing.throwStmt()           // ThrowStatement
+Testing.tryStmt()             // TryStatement
+Testing.ifStmt()              // IfStatement (all params optional)
+Testing.forStmt()             // ForStatement
+Testing.forInStmt()           // ForInStatement
+Testing.forOfStmt()           // ForOfStatement
+Testing.whileStmt()           // WhileStatement
+Testing.doWhileStmt()         // DoWhileStatement
+Testing.switchStmt()          // SwitchStatement
+```
+
+### Declarations
+
+```ts
+// const foo = <init>
+Testing.varDecl('const', 'foo', Testing.callExpr('bar'))
+
+// class Foo extends Bar { x; static y() {} }
+Testing.classDecl('Foo', {
+  superClass: Testing.id('Bar'),
+  members: [Testing.propertyDef('x'), Testing.methodDef('y', true)]
+})
+
+// export { ... }
+Testing.exportNamedDecl(Testing.varDecl('const', 'foo'))
+```
+
+### New expressions
+
+`newExpr` accepts either a string (auto-wrapped in `id()`) or an existing node:
+
+```ts
+Testing.newExpr('Date')                     // new Date()
+Testing.newExpr(Testing.id('Date'))         // equivalent
+Testing.newExpr('Error', [Testing.strLiteral('oops')])  // new Error('oops')
+```
+
+### Program
+
+```ts
+Testing.program(
+  [Testing.exprStmt(Testing.callExpr('foo'))],
+  [Testing.comment('Line', ' eslint-disable')]
+)
+```
+
+### Ancestor helpers
+
+```ts
+// Generic node with optional parent pointer
+Testing.astNode('ThrowStatement', parentNode)
+
+// Build a chain from outermost to innermost — returns the innermost node
+// Creates: FunctionDeclaration → BlockStatement → ThrowStatement
+Testing.withParentChain('FunctionDeclaration', 'BlockStatement', 'ThrowStatement')
+```
+
+### Mock context
+
+```ts
+// Create a mock context directly (returns { context, diagnostics })
+const { context, diagnostics } = Testing.createMockContext({
+  filename: '/src/myFile.ts',
+  sourceText: 'const x = 1;',
+  options: [{ allowedGlobals: [] }]
+});
+
+// Create a Layer for it.effect tests
+const layer = Testing.mockRuleContextLayer({ filename: '/src/myFile.ts' });
+
+// Provide mock context inline inside an Effect
+const result = await Effect.runPromise(
+  Testing.withMockRuleContext(myEffect, { filename: '/src/myFile.ts' })
+);
+```
+
+## Pure test vs it.effect test patterns
+
+<CodeGroup>
+
+```ts pure test
+import { test, expect } from '@effect/vitest';
+import * as Testing from 'effect-oxlint/testing';
+
+// Pure test — no Effect.gen, no yield*
+test('reports JSON.parse', () => {
+  const result = Testing.runRule(
+    noJsonParse,
+    'MemberExpression',
+    Testing.memberExpr('JSON', 'parse')
+  );
+  Testing.expectDiagnostics(result, [{ message: 'Use Schema for JSON' }]);
+});
+```
+
+```ts it.effect test
+import { it } from '@effect/vitest';
+import * as Effect from 'effect/Effect';
+import * as Ref from 'effect/Ref';
+import * as Testing from 'effect-oxlint/testing';
+
+// Effectful test — yield* for Ref state or service access
+it.effect('tracks depth across enter/exit', () =>
+  Effect.gen(function* () {
+    const depthRef = yield* Ref.make(0);
+    // ... exercise rule handlers directly with effectful assertions
+  }).pipe(Effect.provide(Testing.mockRuleContextLayer()))
+);
+```
+
+</CodeGroup>
+
+<Tip>
+Use `test` (not `it`) for pure synchronous tests and `it.effect` for tests that need to `yield*` Effects. This is the convention enforced in the effect-oxlint test suite itself.
+</Tip>

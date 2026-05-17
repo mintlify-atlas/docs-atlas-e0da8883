@@ -1,0 +1,214 @@
+---
+title: "Reporting diagnostics and autofixes in effect-oxlint"
+description: "Build structured lint diagnostics with Diagnostic.make, attach composable fix functions, and submit them via RuleContext.report for autofix support."
+---
+
+The `Diagnostic` module provides builder functions for constructing lint diagnostics and composing the fix functions that oxlint applies during autofix runs. Every constructor and combinator returns a plain data object — there is no mutation. Fixes are ordinary functions that receive an oxlint `Fixer` and return fix operations, so they compose naturally with `Diagnostic.composeFixes`.
+
+## Diagnostic.make — basic diagnostic
+
+`Diagnostic.make(opts)` creates a diagnostic pinned to a node location with an inline message string. The `node` field accepts any `Ranged` value (any AST node or token with source range information).
+
+```ts
+import { Diagnostic } from 'effect-oxlint';
+
+const diag = Diagnostic.make({
+  node,
+  message: 'Avoid this pattern'
+});
+```
+
+An optional `data` field accepts a `DiagnosticData` record for template interpolation when oxlint renders the message.
+
+## Diagnostic.fromId — messageId-based diagnostics
+
+`Diagnostic.fromId(opts)` creates a diagnostic that references a message by its key in `meta.messages` rather than embedding a string directly. Use this when you define all message text in `Rule.meta` and want to keep the rule body free of raw strings.
+
+```ts
+const rule = Rule.define({
+  name: 'no-throw',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Prefer Effect.fail over throw',
+    messages: {
+      noThrow: 'Use Effect.fail instead of throw',
+      noTryCatch: 'Use Effect.try instead of try/catch'
+    }
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      ThrowStatement: (node) =>
+        ctx.report(Diagnostic.fromId({ node, messageId: 'noThrow' }))
+    };
+  }
+});
+```
+
+## Diagnostic.withFix — attaching a single autofix
+
+`Diagnostic.withFix(diagnostic, fix)` attaches a `FixFn` to a diagnostic. It returns a new diagnostic object — the original is not mutated. `withFix` supports the dual API.
+
+```ts
+// Data-first
+const fixed = Diagnostic.withFix(diag, Diagnostic.replaceText(node, 'replacement'));
+
+// Data-last — pipe-friendly
+const fixed2 = pipe(
+  Diagnostic.make({ node, message: 'Avoid this pattern' }),
+  Diagnostic.withFix(Diagnostic.replaceText(node, 'replacement'))
+);
+```
+
+## Diagnostic.withSuggestions — attaching suggestions
+
+`Diagnostic.withSuggestions(diagnostic, suggestions)` attaches an array of suggestion fixes. Suggestions appear in the IDE as quick-fix options but are not applied automatically by `--fix`. `withSuggestions` also supports the dual API.
+
+```ts
+const diag = pipe(
+  Diagnostic.make({ node, message: 'Use safer alternative' }),
+  Diagnostic.withSuggestions([
+    {
+      messageId: 'useSafeVersion',
+      fix: Diagnostic.replaceText(node, 'safeAlternative()')
+    }
+  ])
+);
+```
+
+## Fix operations
+
+Each fix helper returns a `FixFn` — a function that accepts an oxlint `Fixer` and returns a fix operation. Pass a `FixFn` directly to `Diagnostic.withFix` or compose multiple with `Diagnostic.composeFixes`.
+
+<AccordionGroup>
+
+<Accordion title="Diagnostic.replaceText(node, newText)">
+
+Replace the source text of the entire node or token.
+
+```ts
+Diagnostic.replaceText(node, 'newIdentifier')
+Diagnostic.replaceText(callNode, 'Effect.void')
+```
+
+</Accordion>
+
+<Accordion title="Diagnostic.insertBefore(node, text)">
+
+Insert text immediately before the node or token.
+
+```ts
+Diagnostic.insertBefore(node, 'await ')
+Diagnostic.insertBefore(importNode, '// TODO: migrate\n')
+```
+
+</Accordion>
+
+<Accordion title="Diagnostic.insertAfter(node, text)">
+
+Insert text immediately after the node or token.
+
+```ts
+Diagnostic.insertAfter(node, ' as const')
+Diagnostic.insertAfter(stmt, '\n// added by autofix')
+```
+
+</Accordion>
+
+<Accordion title="Diagnostic.removeFix(node)">
+
+Remove the node or token entirely from the source.
+
+```ts
+Diagnostic.removeFix(throwStmtNode)
+Diagnostic.removeFix(unusedImportNode)
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## Diagnostic.composeFixes — combining multiple fixes
+
+`Diagnostic.composeFixes(...fixes)` merges any number of `FixFn` values into a single `FixFn`. All individual fixes are collected into one array and applied together by oxlint.
+
+```ts
+const multiFix = Diagnostic.composeFixes(
+  Diagnostic.insertBefore(node, 'prefix'),
+  Diagnostic.insertAfter(node, 'suffix')
+);
+```
+
+Pass the composed fix to `withFix` as usual:
+
+```ts
+const diag = pipe(
+  Diagnostic.make({ node, message: 'Wrap with prefix and suffix' }),
+  Diagnostic.withFix(multiFix)
+);
+```
+
+## Full example
+
+This example shows the complete diagnostic construction chain — basic make, single fix, and composed multi-fix:
+
+```ts
+import { Diagnostic } from 'effect-oxlint';
+import { pipe } from 'effect';
+
+// 1. Basic diagnostic
+const diag = Diagnostic.make({ node, message: 'Avoid this pattern' });
+
+// 2. With a single autofix — replaces the node's text
+const fixed = Diagnostic.withFix(diag, Diagnostic.replaceText(node, 'replacement'));
+
+// 3. Compose multiple fixes
+const multiFix = Diagnostic.composeFixes(
+  Diagnostic.insertBefore(node, 'prefix'),
+  Diagnostic.insertAfter(node, 'suffix')
+);
+
+// 4. Attach the composed fix
+const multiFixed = pipe(
+  Diagnostic.make({ node, message: 'Wrap with prefix and suffix' }),
+  Diagnostic.withFix(multiFix)
+);
+```
+
+## Submitting diagnostics via RuleContext
+
+Diagnostics are submitted through `ctx.report(diagnostic)` inside your `create` generator:
+
+```ts
+import { Diagnostic, RuleContext } from 'effect-oxlint';
+
+const rule = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({ type: 'suggestion', description: '...' }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      MemberExpression: (node) =>
+        pipe(
+          AST.matchMember(node, 'JSON', 'parse'),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                pipe(
+                  Diagnostic.make({ node: matched, message: 'Use Schema instead' }),
+                  Diagnostic.withFix(Diagnostic.replaceText(matched, 'Schema.decode(...)'))
+                )
+              )
+          })
+        )
+    };
+  }
+});
+```
+
+`ctx.report` returns `Effect<void>`, so you can `yield*` it directly or return it from a handler — both work because handlers return `Effect<void>`.
+
+<Warning>
+`Diagnostic.composeFixes` collects all fix results into a flat array. When individual fixes produce overlapping source ranges, oxlint may reject conflicting operations. Prefer non-overlapping fixes, or let the user apply suggestions individually.
+</Warning>

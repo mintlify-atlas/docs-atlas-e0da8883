@@ -1,0 +1,442 @@
+---
+title: "Rule module API reference"
+description: "API reference for the Rule module: Rule.define, Rule.meta, and ban factories for members, imports, calls, new expressions, statements, and multi-pattern rules."
+---
+
+The `Rule` module is the primary entry point for authoring Effect-first oxlint rules. `Rule.define` lets you write a `create` generator that uses `yield*` for state, context access, and diagnostics, while the convenience factories — `banMember`, `banImport`, `banCallOf`, `banCallOfMember`, `banNewExpr`, `banStatement`, and `banMultiple` — cover the most common lint patterns without requiring a full generator.
+
+## Rule.define
+
+Defines an Effect-first oxlint rule. The `create` generator runs once per file; each visitor handler runs once per matching node. State created via `Ref.make` in `create` persists across handler calls through closure.
+
+```typescript
+export const define = <Options = undefined>(
+  config: RuleConfig<Options>
+): CreateRule
+```
+
+### RuleConfig interface
+
+<ParamField path="name" type="string" required>
+  Rule name used for tracing spans.
+</ParamField>
+
+<ParamField path="meta" type="RuleMeta" required>
+  Oxlint rule metadata. Build with `Rule.meta(...)`.
+</ParamField>
+
+<ParamField path="options" type="Schema.Decoder<Options>">
+  Optional Effect Schema for rule options. When provided, the first element of the raw JSON options array is decoded at `create` time.
+</ParamField>
+
+<ParamField path="create" type="(options: Options) => Effect.gen.Return<TypedEffectVisitor, never, RuleContext>" required>
+  The create generator. Receives decoded options and returns a `TypedEffectVisitor`. Runs inside an Effect context where `RuleContext` is available. May `yield*` `Ref.make(...)` for state and `yield* RuleContext` for context access.
+</ParamField>
+
+<Note>
+  Both the `create` generator and individual visitor handlers have a fixed error channel of `never`. Rules cannot fail via `Effect.fail`. If a handler needs a fallible sub-effect, catch the error inside the handler and surface it as a diagnostic.
+</Note>
+
+```typescript
+import * as Effect from 'effect/Effect';
+import * as Option from 'effect/Option';
+import { AST, Diagnostic, Rule, RuleContext } from 'effect-oxlint';
+
+const noJsonParse = Rule.define({
+  name: 'no-json-parse',
+  meta: Rule.meta({
+    type: 'suggestion',
+    description: 'Use Schema for JSON decoding instead of JSON.parse'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      // node is typed as ESTree.MemberExpression automatically
+      MemberExpression: (node) =>
+        Option.match(
+          AST.matchMember(node, 'JSON', ['parse', 'stringify']),
+          {
+            onNone: () => Effect.void,
+            onSome: (matched) =>
+              ctx.report(
+                Diagnostic.make({ node: matched, message: 'Use Schema for JSON' })
+              )
+          }
+        )
+    };
+  }
+});
+```
+
+---
+
+## Rule.meta
+
+Builds a `RuleMeta` object with sensible defaults.
+
+```typescript
+export const meta = (opts: {
+  readonly type: 'problem' | 'suggestion' | 'layout';
+  readonly description: string;
+  readonly fixable?: 'code' | 'whitespace' | undefined;
+  readonly hasSuggestions?: boolean | undefined;
+  readonly messages?: Record<string, string> | undefined;
+  readonly docs?: RuleDocs | undefined;
+}): RuleMeta
+```
+
+<ParamField path="type" type="'problem' | 'suggestion' | 'layout'" required>
+  The rule category. Use `'problem'` for likely bugs, `'suggestion'` for style improvements, and `'layout'` for formatting.
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Human-readable description of what the rule enforces.
+</ParamField>
+
+<ParamField path="fixable" type="'code' | 'whitespace'">
+  Set when the rule provides an autofix. `'code'` for semantic changes, `'whitespace'` for formatting-only fixes.
+</ParamField>
+
+<ParamField path="hasSuggestions" type="boolean">
+  Set to `true` when the rule provides suggestion fixes (non-automatic fixes users can apply manually).
+</ParamField>
+
+<ParamField path="messages" type="Record<string, string>">
+  A map of message IDs to message templates, used with `Diagnostic.fromId`.
+</ParamField>
+
+<ParamField path="docs" type="RuleDocs">
+  Additional documentation metadata passed to oxlint.
+</ParamField>
+
+```typescript
+Rule.meta({
+  type: 'problem',
+  description: 'Disallow direct use of Date constructor',
+  fixable: 'code',
+  messages: {
+    useClockService: 'Use the Clock service instead of {{expr}}'
+  }
+})
+```
+
+---
+
+## Rule.banMember
+
+Creates a rule that bans `obj.prop` member expression access.
+
+```typescript
+export const banMember = (
+  obj: string,
+  prop: string | ReadonlyArray<string>,
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="obj" type="string" required>
+  The object identifier to match (e.g. `'Math'`, `'console'`).
+</ParamField>
+
+<ParamField path="prop" type="string | ReadonlyArray<string>" required>
+  One or more property names to ban on the object.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban Math.random
+const noMathRandom = Rule.banMember('Math', 'random', {
+  message: 'Use the Effect Random service instead'
+});
+
+// Ban JSON.parse and JSON.stringify
+const noJsonMethods = Rule.banMember('JSON', ['parse', 'stringify'], {
+  message: 'Use Effect Schema for JSON encoding/decoding',
+  meta: { type: 'problem' }
+});
+```
+
+---
+
+## Rule.banImport
+
+Creates a rule that bans imports matching a source string or predicate.
+
+```typescript
+export const banImport = (
+  source: string | ((source: string) => boolean),
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="source" type="string | ((source: string) => boolean)" required>
+  Either an exact source string to match, or a predicate function that receives the import source and returns `true` to ban it.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban exact source
+const noNodeFs = Rule.banImport('node:fs', {
+  message: 'Use the Effect FileSystem service instead'
+});
+
+// Ban all node: built-ins with a predicate
+const noNodeBuiltins = Rule.banImport((src) => src.startsWith('node:'), {
+  message: 'Use Effect services for I/O'
+});
+```
+
+---
+
+## Rule.banCallOf
+
+Creates a rule that bans bare identifier call expressions such as `fetch(...)` or `useState(...)`.
+
+```typescript
+export const banCallOf = (
+  name: string | ReadonlyArray<string>,
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="name" type="string | ReadonlyArray<string>" required>
+  One or more bare identifier names to ban when called.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban a single call
+Rule.banCallOf('fetch', { message: 'Use Effect HTTP client' })
+
+// Ban multiple calls
+Rule.banCallOf(['useState', 'useEffect'], { message: 'Use Effect' })
+```
+
+---
+
+## Rule.banCallOfMember
+
+Creates a rule that bans `obj.prop(...)` method-call patterns.
+
+```typescript
+export const banCallOfMember = (
+  obj: string,
+  prop: string | ReadonlyArray<string>,
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="obj" type="string" required>
+  The object identifier whose method calls to ban (e.g. `'Effect'`, `'console'`).
+</ParamField>
+
+<ParamField path="prop" type="string | ReadonlyArray<string>" required>
+  One or more method names to ban on the object.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban Effect.runSync(...)
+Rule.banCallOfMember('Effect', 'runSync', { message: 'Keep effects composable' })
+
+// Ban console.log(...) and console.error(...)
+Rule.banCallOfMember('console', ['log', 'error'], { message: 'Use Effect.log' })
+```
+
+---
+
+## Rule.banNewExpr
+
+Creates a rule that bans `new` expressions with the given callee name.
+
+```typescript
+export const banNewExpr = (
+  name: string | ReadonlyArray<string>,
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="name" type="string | ReadonlyArray<string>" required>
+  One or more constructor names to ban (e.g. `'Date'`, `'Error'`).
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban a single constructor
+Rule.banNewExpr('Date', { message: 'Use Clock service' })
+
+// Ban multiple constructors
+Rule.banNewExpr(['Error', 'TypeError'], { message: 'Use tagged errors' })
+```
+
+---
+
+## Rule.banStatement
+
+Creates a rule that bans a specific AST statement node type.
+
+```typescript
+export const banStatement = (
+  nodeType: string,
+  opts: {
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+<ParamField path="nodeType" type="string" required>
+  The ESTree node type name to ban, such as `'ThrowStatement'` or `'ForStatement'`.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported when the pattern is found.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+const noThrow = Rule.banStatement('ThrowStatement', {
+  message: 'Use Effect.fail instead of throw'
+});
+```
+
+---
+
+## Rule.banMultiple
+
+Creates a rule that bans multiple patterns under a shared message, combining call bans, `new` expression bans, member bans, import bans, and statement bans into a single merged rule.
+
+```typescript
+export const banMultiple = (
+  spec: BanMultipleSpec,
+  opts: {
+    readonly name?: string | undefined;
+    readonly message: string;
+    readonly meta?: { readonly type?: 'problem' | 'suggestion' } | undefined;
+  }
+): CreateRule
+```
+
+### BanMultipleSpec interface
+
+<ParamField path="calls" type="string | ReadonlyArray<string>">
+  Bare identifier calls to ban (e.g. `'fetch'` or `['useState', 'useEffect']`).
+</ParamField>
+
+<ParamField path="newExprs" type="string | ReadonlyArray<string>">
+  `new` expressions to ban (e.g. `'Date'` or `['Error', 'TypeError']`).
+</ParamField>
+
+<ParamField path="members" type="ReadonlyArray<readonly [obj: string, prop: string | ReadonlyArray<string>]>">
+  Member expressions to ban as `[object, property | properties]` tuples.
+</ParamField>
+
+<ParamField path="memberCalls" type="ReadonlyArray<readonly [obj: string, prop: string | ReadonlyArray<string>]>">
+  Member call expressions to ban as `[object, property | properties]` tuples.
+</ParamField>
+
+<ParamField path="imports" type="ReadonlyArray<string | ((source: string) => boolean)>">
+  Import sources to ban — each entry is either an exact string or a predicate.
+</ParamField>
+
+<ParamField path="statements" type="ReadonlyArray<string>">
+  Statement node type names to ban (e.g. `'ThrowStatement'`).
+</ParamField>
+
+### opts
+
+<ParamField path="opts.name" type="string">
+  Custom rule name. Defaults to `'ban-multiple'`.
+</ParamField>
+
+<ParamField path="opts.message" type="string" required>
+  The diagnostic message reported for every matched pattern.
+</ParamField>
+
+<ParamField path="opts.meta.type" type="'problem' | 'suggestion'">
+  Overrides the default rule type (`'suggestion'`).
+</ParamField>
+
+```typescript
+// Ban all imperative loop statements
+Rule.banMultiple(
+  {
+    statements: [
+      'ForStatement', 'ForInStatement', 'ForOfStatement',
+      'WhileStatement', 'DoWhileStatement'
+    ]
+  },
+  { message: 'Use Arr.map / Effect.forEach instead' }
+)
+
+// Combine import and member bans
+Rule.banMultiple(
+  {
+    imports: ['node:fs'],
+    members: [['fs', ['readFileSync', 'writeFileSync']]]
+  },
+  { message: 'Use Effect FileSystem service' }
+)
+
+// Combine new expression and member bans
+Rule.banMultiple(
+  {
+    newExprs: 'Date',
+    members: [['Date', 'now']]
+  },
+  { message: 'Use Clock service' }
+)
+```

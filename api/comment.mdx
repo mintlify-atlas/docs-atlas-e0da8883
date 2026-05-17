@@ -1,0 +1,181 @@
+---
+title: "Comment module API reference"
+description: "Type predicates and text helpers for oxlint comments — isLine, isBlock, isShebang, isJSDoc, isDisableDirective, isEnableDirective, and text."
+---
+
+The `Comment` module provides boolean predicates and a text accessor for working with oxlint comment nodes. Oxlint comments have a `type` of `"Line"`, `"Block"`, or `"Shebang"` and a `value` string containing the comment text without its delimiters. Use these helpers inside visitors that call `sourceCode.getAllComments()` to filter and inspect comments without manual string checks.
+
+## Type predicates
+
+### `Comment.isLine`
+
+Returns `true` if the comment is a line comment (`// ...`).
+
+```ts
+export const isLine = (comment: Comment): boolean
+```
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node, typically from `sourceCode.getAllComments()`.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `comment.type === "Line"`.
+</ResponseField>
+
+---
+
+### `Comment.isBlock`
+
+Returns `true` if the comment is a block comment (`/* ... */`).
+
+```ts
+export const isBlock = (comment: Comment): boolean
+```
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `comment.type === "Block"`.
+</ResponseField>
+
+---
+
+### `Comment.isShebang`
+
+Returns `true` if the comment is a shebang line (`#!/usr/bin/env node`).
+
+```ts
+export const isShebang = (comment: Comment): boolean
+```
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `comment.type === "Shebang"`.
+</ResponseField>
+
+---
+
+### `Comment.isJSDoc`
+
+Returns `true` if the comment is a JSDoc block comment (`/** ... */`).
+
+```ts
+export const isJSDoc = (comment: Comment): boolean
+```
+
+A JSDoc comment is a block comment whose `value` starts with `*`. This matches the `/**` opening delimiter pattern — the leading `*` is the first character after `/*`.
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when `comment.type === "Block"` and `comment.value` starts with `"*"`.
+</ResponseField>
+
+---
+
+### `Comment.isDisableDirective`
+
+Returns `true` if the comment is an eslint or oxlint disable directive.
+
+```ts
+export const isDisableDirective = (comment: Comment): boolean
+```
+
+Matches both line comments (`// eslint-disable-next-line ...`, `// oxlint-disable-next-line ...`) and block comments (`/* eslint-disable ... */`, `/* oxlint-disable ... */`). The check trims leading whitespace from the comment value before matching.
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when the trimmed value starts with `"eslint-disable"` or `"oxlint-disable"`.
+</ResponseField>
+
+---
+
+### `Comment.isEnableDirective`
+
+Returns `true` if the comment is an eslint or oxlint enable directive.
+
+```ts
+export const isEnableDirective = (comment: Comment): boolean
+```
+
+Matches `// eslint-enable ...`, `/* eslint-enable ... */`, `// oxlint-enable ...`, and `/* oxlint-enable ... */`. Leading whitespace is trimmed before matching.
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="boolean" type="boolean">
+  `true` when the trimmed value starts with `"eslint-enable"` or `"oxlint-enable"`.
+</ResponseField>
+
+---
+
+## Text accessor
+
+### `Comment.text`
+
+Returns the text content of a comment without its delimiters.
+
+```ts
+export const text = (comment: Comment): string
+```
+
+For a line comment `// hello world`, `text` returns `" hello world"`. For a block comment `/* some text */`, it returns `" some text "`. The delimiters themselves (`//`, `/*`, `*/`) are never included.
+
+<ParamField path="comment" type="Comment" required>
+  An oxlint `Comment` node.
+</ParamField>
+
+<ResponseField name="string" type="string">
+  The raw `comment.value` string.
+</ResponseField>
+
+---
+
+## Usage with `SourceCode.getAllComments`
+
+The typical pattern is to call `getAllComments()` inside a `Program` visitor, then filter and inspect comments using the predicates:
+
+```ts
+import { Comment, Rule, RuleContext, Diagnostic, SourceCode } from 'effect-oxlint'
+import * as Arr from 'effect/Array'
+import * as Effect from 'effect/Effect'
+
+const noDisableDirectives = Rule.define({
+  name: 'no-disable-directives',
+  meta: Rule.meta({
+    type: 'problem',
+    description: 'Disallow disable directives'
+  }),
+  create: function* () {
+    const ctx = yield* RuleContext;
+    return {
+      Program: (node) =>
+        Effect.gen(function* () {
+          const comments = yield* SourceCode.getAllComments()
+          const disabling = Arr.filter(comments, Comment.isDisableDirective)
+          for (const c of disabling) {
+            yield* ctx.report(
+              Diagnostic.make({ node, message: `Disable directive found: ${Comment.text(c).trim()}` })
+            )
+          }
+        })
+    };
+  }
+})
+```
+
+<Note>
+  `Comment.isJSDoc` implies `Comment.isBlock`. You do not need to check both — `isJSDoc` already verifies the `"Block"` type before checking the leading `*`.
+</Note>
